@@ -21,16 +21,16 @@ export class Notification extends Document {
   @Prop({ type: [{ type: Types.ObjectId, ref: 'User' }] })
   actorIds!: Types.ObjectId[];
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   otherCount!: number;
 
-  @Prop({ required: true })
+  @Prop({ type: String, required: true })
   content!: string;
 
   @Prop({ type: Types.ObjectId })
   targetId?: Types.ObjectId;
 
-  @Prop({ default: false, index: true })
+  @Prop({ type: Boolean, default: false, index: true })
   isRead!: boolean;
 
   /**

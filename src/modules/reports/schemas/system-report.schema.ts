@@ -7,7 +7,7 @@ export class SystemReport extends Document {
   reporterId!: Types.ObjectId;
 
   // Nội dung chi tiết lỗi (Content từ textarea của bạn)
-  @Prop({ required: true, trim: true })
+  @Prop({ type: String, required: true, trim: true })
   description!: string;
 
   // Lưu thông tin file đính kèm (Cloudinary URL)

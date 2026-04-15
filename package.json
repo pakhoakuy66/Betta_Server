@@ -1,5 +1,5 @@
 {
-  "name": "Betta_Server",
+  "name": "betta_server",
   "version": "0.0.1",
   "description": "",
   "author": "",
@@ -9,7 +9,7 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
-    "start:dev": "nest start --watch",
+    "dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
@@ -29,6 +29,7 @@
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/platform-socket.io": "^11.1.15",
     "@nestjs/schedule": "^6.1.1",
+    "@nestjs/swagger": "^11.2.7",
     "@nestjs/websockets": "^11.1.15",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
@@ -40,7 +41,8 @@
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "swagger-ui-dist": "^5.32.3"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

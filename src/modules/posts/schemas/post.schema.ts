@@ -12,7 +12,7 @@ export class Post extends Document {
   authorId!: Types.ObjectId;
 
   // 2. NỘI DUNG: Dạng text (Mục 3.3 SRS)
-  @Prop({ required: true, trim: true })
+  @Prop({ type: String, required: true, trim: true })
   content!: string;
 
   // 3. HÌNH ẢNH: Lưu mảng các URL (Cloudinary)
@@ -28,10 +28,10 @@ export class Post extends Document {
   images!: { url: string; publicId: string }[];
 
   // 4. THỐNG KÊ (Denormalization - Để load nhanh không cần count)
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   likeCount!: number;
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   shareCount!: number;
 
   // 5. CƠ CHẾ TỰ XÓA SAU 24 GIỜ (Mục 3.3 SRS)
@@ -45,7 +45,7 @@ export class Post extends Document {
   expireAt!: Date;
 
   // Thêm vào trong Post class
-  @Prop({ default: false })
+  @Prop({ type: Boolean, default: false })
   isDeletedByAdmin!: boolean; // Để ẩn bài viết nếu vi phạm (dù chưa hết 24h)
 }
 

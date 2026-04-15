@@ -12,7 +12,7 @@ export class Reaction extends Document {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   postOwnerId!: Types.ObjectId; // Chủ bài viết (Cực kỳ quan trọng để làm Recap nhanh)
 
-  @Prop({ default: 'heart' })
+  @Prop({ type: String, default: 'heart' })
   emojiType!: string; // Mở rộng nếu sau này có nhiều loại emoji
 }
 

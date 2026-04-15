@@ -12,21 +12,21 @@ export class StreakHistory extends Document {
 
   // 2. NGÀY GHI NHẬN (Định dạng: YYYY-MM-DD)
   // Việc lưu string giúp Cron Job truy vấn cực nhanh mà không bị lệch múi giờ (Timezone)
-  @Prop({ required: true, index: true })
+  @Prop({ type: String, required: true, index: true })
   date!: string;
 
   // 3. TRẠNG THÁI GIỮ CHUỖI
-  @Prop({ default: false })
+  @Prop({ type: Boolean, default: false })
   hasPosted!: boolean;
 
   // 4. BIẾN ĐỘNG ĐIỂM SỐ TRONG NGÀY
   // Lưu số điểm cộng thêm hoặc bị trừ (âm) trong ngày này
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   pointsChanged!: number;
 
   // 5. CHỈ SỐ STREAK TẠI THỜI ĐIỂM ĐÓ
   // Lưu lại để có thể vẽ biểu đồ tăng trưởng Streak nếu cần
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   currentStreakCount!: number;
 }
 

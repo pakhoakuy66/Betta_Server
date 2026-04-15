@@ -9,7 +9,7 @@ export class Report extends Document {
   reporterId!: Types.ObjectId;
 
   // 2. ĐỐI TƯỢNG BỊ BÁO CÁO (Sử dụng Đa hình)
-  @Prop({ required: true, enum: ['POST', 'USER'], index: true })
+  @Prop({ type: String, required: true, enum: ['POST', 'USER'], index: true })
   targetType!: string;
 
   @Prop({ type: Types.ObjectId, required: true, index: true })

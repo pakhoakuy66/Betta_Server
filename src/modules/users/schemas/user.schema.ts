@@ -3,11 +3,20 @@ import { Document } from 'mongoose';
 
 @Schema({ timestamps: true }) // Tự động thêm createdAt, updatedAt
 export class User extends Document {
-  @Prop({ required: true, unique: true, index: true })
+  @Prop({ type: String, required: true, unique: true, index: true })
   username!: string;
 
-  @Prop({ required: true })
+  @Prop({ type: String, required: true })
   fullname!: string;
+
+  @Prop({ type: String, required: true, unique: true, index: true })
+  phone!: string;
+
+  @Prop({ type: String, required: true, unique: true, index: true })
+  email!: string; 
+
+  @Prop({ type: String, required: true })
+  password!: string;
 
   @Prop({ default: 'user_1_bibjpn' })
   avatarId!: string;
@@ -18,37 +27,48 @@ export class User extends Document {
   })
   avatar!: string;
 
-  @Prop({ default: '' })
+  @Prop({ type: String, default: '' })
   bio!: string;
 
-  @Prop({ default: '' })
+  @Prop({ type: String, default: '' })
   link!: string;
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   streakCount!: number;
 
-  @Prop({ default: Date.now })
+  @Prop({ type: Date, default: Date.now })
   lastActive!: Date; // Phục vụ tính năng tính toán Streak (3.6)
 
   // QUẢN LÝ TRẠNG THÁI (Chuẩn doanh nghiệp)
-  @Prop({ default: false })
+  @Prop({ type: Boolean, default: false })
   isDeleted!: boolean; // Soft Delete
 
-  @Prop()
+  @Prop({ type: Date })
   deletedAt?: Date;
 
-  @Prop({ default: 'active', enum: ['active', 'banned', 'reported'] })
+  @Prop({
+    type: String,
+    default: 'active',
+    enum: ['active', 'banned', 'reported'],
+  })
   status!: string; // Phục vụ tính năng Báo cáo tài khoản (3.15)
 
   // CÁC TRƯỜNG METADATA (Dùng để hiển thị nhanh ở Profile)
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   postsCount!: number;
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   followersCount!: number;
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   followingCount!: number;
+
+  // Các trường cho Forgot Password
+  @Prop({ type: String, select: false })
+  forgotPasswordOtp?: string;
+
+  @Prop({ type: Date, select: false })
+  forgotPasswordExpiry?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

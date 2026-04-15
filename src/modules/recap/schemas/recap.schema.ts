@@ -12,10 +12,10 @@ export class WeeklyRecap extends Document {
   userId!: Types.ObjectId;
 
   // 2. ĐỊNH DANH THỜI GIAN (Dùng để truy vấn bản cũ/mới)
-  @Prop({ required: true })
+  @Prop({ type: Number, required: true })
   weekNumber!: number; // Số tuần trong năm (1-52)
 
-  @Prop({ required: true })
+  @Prop({ type: Number, required: true })
   year!: number; // Ví dụ: 2024
 
   // 3. DỮ LIỆU TỔNG HỢP (Khớp hoàn toàn với UserSlideData trong FE của bạn)
@@ -41,7 +41,7 @@ export class WeeklyRecap extends Document {
   };
 
   // 4. TRẠNG THÁI HIỂN THỊ
-  @Prop({ default: false })
+  @Prop({ type: Boolean, default: false })
   isSeen!: boolean; // Để FE hiển thị chấm đỏ thông báo tuần mới
 
   // 5. CƠ CHẾ TỰ HỦY (Tối ưu tài nguyên)
