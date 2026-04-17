@@ -280,4 +280,32 @@ export class AuthService {
 
     return { success: true, message: 'Đổi mật khẩu thành công!' };
   }
+
+  async logout(userId: string) {
+    try {
+      // 1. Kiểm tra User có tồn tại không (Phòng trường hợp User bị xóa lúc đang đăng nhập)
+      const user = await this.userModel.findById(userId);
+      if (!user) {
+        throw new NotFoundException('Người dùng không tồn tại');
+      }
+
+      // 2. LOGIC CHUẨN DOANH NGHIỆP:
+      // - Nếu ông dùng Refresh Token: Hãy xóa refreshToken trong DB của user này tại đây.
+      // - Nếu ông dùng Redis: Đưa Access Token này vào Blacklist để nó không dùng được nữa.
+
+      // Ví dụ: await this.userModel.updateOne({ _id: userId }, { $set: { refreshToken: null } });
+
+      return {
+        success: true,
+        message: 'Đăng xuất thành công!',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+
+      throw new InternalServerErrorException(
+        'Có lỗi xảy ra trong quá trình xử lý đăng xuất',
+      );
+    }
+  }
 }

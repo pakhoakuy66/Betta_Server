@@ -45,7 +45,7 @@ async function bootstrap() {
         description: 'Nhập Token vào đây',
         in: 'header',
       },
-      'JWT-auth', // Tên này phải khớp với bên Controller nếu dùng @ApiBearerAuth()
+      'access-token', // Tên này phải khớp với bên Controller nếu dùng @ApiBearerAuth()
     )
     .build();
 

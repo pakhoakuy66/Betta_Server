@@ -52,6 +52,16 @@ export class AuthController {
     return this.authService.resetPassword(dto);
   }
 
+  @ApiOperation({ summary: 'Đăng xuất hệ thống' })
+  @ApiBearerAuth('access-token') // Để hiện nút nhập Token trên Swagger
+  @UseGuards(AuthGuard('jwt'))
+  @Post('logout')
+  async logout(@Request() req: any) {
+    // req.user được gán giá trị từ JwtStrategy.validate() của ông
+    const userId = req.user._id;
+    return this.authService.logout(userId);
+  }
+
   // API lấy thông tin cá nhân (Cần gửi Token lên Header)
   @ApiBearerAuth() // Đánh dấu API này yêu cầu Token (Bearer)
   @ApiOperation({ summary: 'Lấy thông tin cá nhân hiện tại' })
