@@ -132,8 +132,7 @@ export class AuthService {
 
     return {
       success: true,
-      message:
-        'Đăng ký thành công! Hãy đăng nhập để bắt đầu hành trình của bạn.',
+      message: 'Đăng ký thành công!',
     };
   }
 

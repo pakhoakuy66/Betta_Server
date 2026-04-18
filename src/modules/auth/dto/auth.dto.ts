@@ -52,7 +52,7 @@ export class RegisterDto {
 export class LoginDto {
   @ApiProperty({ example: 'khoa@example.com' })
   @IsNotEmpty({ message: 'Email không được bỏ trống' })
-  @IsEmail({}, { message: 'Định dạng email không hợp lệ' })
+  @IsEmail({}, { message: 'Email hoặc mật khẩu không chính xác' })
   email!: string;
 
   @ApiProperty({ example: 'Password123@' })
@@ -95,8 +95,11 @@ export class ResetPasswordDto {
   @IsNotEmpty()
   @IsString()
   @MinLength(6, {
+    message: 'Mật khẩu phải tối thiểu 6 ký tự.',
+  })
+  @Matches(/((?=.*\d)|(?=.*\W+))(?![.\n])(?=.*[A-Z])(?=.*[a-z]).*$/, {
     message:
-      'Mật khẩu phải tối thiểu 6 ký tự , bao gồm chữ, số và ký tự đặc biệt (!$@%) .',
+      'Mật khẩu quá yếu (phải bao gồm chữ hoa, chữ thường, số và ký tự đặc biệt)',
   })
   newPassword!: string;
 }
