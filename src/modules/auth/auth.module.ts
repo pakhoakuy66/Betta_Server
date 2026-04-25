@@ -5,6 +5,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './services/auth.service';
+import { MailService } from './services/mail.service';
 import { AuthController } from './controllers/auth.controller';
 import { User, UserSchema } from '../users/schemas/user.schema'; // Đảm bảo đúng đường dẫn
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -25,6 +26,6 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, MailService],
 })
 export class AuthModule {}

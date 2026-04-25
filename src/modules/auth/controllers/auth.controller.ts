@@ -14,6 +14,7 @@ import {
   ForgotPasswordDto,
   VerifyOtpDto,
   ResetPasswordDto,
+  RefreshTokenDto,
 } from '../dto/auth.dto';
 import { LoginDto } from '../dto/auth.dto';
 
@@ -50,6 +51,12 @@ export class AuthController {
   @Post('reset-password')
   async resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @ApiOperation({ summary: 'Làm mới Access Token' })
+  @Post('refresh-token')
+  async refreshToken(@Body() dto: RefreshTokenDto) {
+    return this.authService.refreshToken(dto.refreshToken);
   }
 
   @ApiOperation({ summary: 'Đăng xuất hệ thống' })

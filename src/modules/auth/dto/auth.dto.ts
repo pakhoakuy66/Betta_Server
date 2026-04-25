@@ -103,3 +103,10 @@ export class ResetPasswordDto {
   })
   newPassword!: string;
 }
+
+export class RefreshTokenDto {
+  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI...' })
+  @IsNotEmpty({ message: 'Vui lòng cung cấp Refresh Token' })
+  @IsString()
+  refreshToken!: string;
+}

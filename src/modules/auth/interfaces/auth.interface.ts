@@ -17,6 +17,7 @@ export interface PublicUser {
 export interface AuthResponse {
   message: string;
   access_token: string;
+  refresh_token: string;
   user: PublicUser;
 }
 

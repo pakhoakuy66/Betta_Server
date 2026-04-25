@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
-
+import { MailService } from './mail.service';
 import { User } from '../../users/schemas/user.schema';
 import {
   RegisterDto,
@@ -59,6 +59,7 @@ export class AuthService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<User>,
     private readonly jwtService: JwtService,
+    private readonly mailService: MailService,
   ) {}
 
   // ─────────────────────────────────────────────
@@ -71,7 +72,8 @@ export class AuthService {
       email: user.email,
       username: user.username,
     };
-    return this.jwtService.sign(payload);
+    // Access Token sống siêu ngắn (15 phút)
+    return this.jwtService.sign(payload, { expiresIn: '15m' });
   }
 
   private toPublicUser(user: User) {
@@ -158,12 +160,23 @@ export class AuthService {
     }
 
     const access_token = this.generateToken(user);
+    
+    // Tạo Refresh Token sống dài (7 ngày)
+    const refresh_token = this.jwtService.sign(
+      { sub: user._id },
+      { expiresIn: '7d' },
+    );
+
+    // Lưu vào DB
+    user.refreshToken = refresh_token;
+    await user.save();
 
     this.logger.log(`User logged in: ${user._id}`);
 
     return {
       message: 'Đăng nhập thành công',
       access_token,
+      refresh_token,
       user: this.toPublicUser(user),
     };
   }
@@ -217,7 +230,8 @@ export class AuthService {
 
     // Gửi email (Giả sử ông đã có MailService, nếu chưa thì log ra console để test)
     this.logger.log(`OTP cho ${body.email} là: ${otp}`);
-    // await this.mailService.sendOtp(body.email, otp);
+    // Gửi email thật cho User thay vì log console
+    this.mailService.sendOtpEmail(body.email, otp);
 
     // Test OTP
     console.log('EMAIL:', body.email);
@@ -288,11 +302,9 @@ export class AuthService {
         throw new NotFoundException('Người dùng không tồn tại');
       }
 
-      // 2. LOGIC CHUẨN DOANH NGHIỆP:
-      // - Nếu ông dùng Refresh Token: Hãy xóa refreshToken trong DB của user này tại đây.
-      // - Nếu ông dùng Redis: Đưa Access Token này vào Blacklist để nó không dùng được nữa.
-
-      // Ví dụ: await this.userModel.updateOne({ _id: userId }, { $set: { refreshToken: null } });
+      // Clear refresh token
+      user.refreshToken = null;
+      await user.save();
 
       return {
         success: true,
@@ -305,6 +317,38 @@ export class AuthService {
       throw new InternalServerErrorException(
         'Có lỗi xảy ra trong quá trình xử lý đăng xuất',
       );
+    }
+  }
+
+  // LÀM MỚI TOKEN
+  async refreshToken(refreshToken: string) {
+    try {
+      // 1. Verify xem token còn hạn không
+      const decoded = this.jwtService.verify(refreshToken);
+      
+      // 2. Tìm user và check xem token có khớp DB không (Chống thu hồi)
+      const user = await this.userModel.findById(decoded.sub);
+      if (!user || user.refreshToken !== refreshToken || user.isDeleted) {
+        throw new UnauthorizedException('Refresh token không hợp lệ hoặc đã bị thu hồi');
+      }
+
+      // 3. Cấp cặp token mới để liên tục cuốn chiếu (Refresh Token Rotation)
+      const new_access_token = this.generateToken(user);
+      const new_refresh_token = this.jwtService.sign(
+        { sub: user._id },
+        { expiresIn: '7d' },
+      );
+
+      // 4. Update DB
+      user.refreshToken = new_refresh_token;
+      await user.save();
+
+      return {
+        access_token: new_access_token,
+        refresh_token: new_refresh_token,
+      };
+    } catch (err) {
+      throw new UnauthorizedException('Refresh token không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.');
     }
   }
 }

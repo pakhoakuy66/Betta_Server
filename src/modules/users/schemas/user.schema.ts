@@ -69,6 +69,10 @@ export class User extends Document {
 
   @Prop({ type: Date, select: false })
   forgotPasswordExpiry?: Date;
+
+  // Xử lý Refresh Token (Chuẩn Doanh Nghiệp)
+  @Prop({ type: String, default: null })
+  refreshToken?: string | null;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
