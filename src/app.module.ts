@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
@@ -11,7 +13,27 @@ import { UploadsModule } from './modules/uploads/uploads.module';
 import { UsersModule } from './modules/users/users.module';
 
 @Module({
-  imports: [AuthModule, PostsModule, RecapModule, StreakModule, NotificationsModule, ReportsModule, UploadsModule, UsersModule],
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '.env',
+    }),
+    MongooseModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        uri: configService.get<string>('DATABASE_URL'),
+      }),
+      inject: [ConfigService],
+    }),
+    AuthModule, 
+    PostsModule, 
+    RecapModule, 
+    StreakModule, 
+    NotificationsModule, 
+    ReportsModule, 
+    UploadsModule, 
+    UsersModule
+  ],
   controllers: [AppController],
   providers: [AppService],
 })
