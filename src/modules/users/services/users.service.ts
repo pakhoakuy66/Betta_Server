@@ -1,18 +1,20 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { User } from '../schemas/user.schema';
 import { UpdateProfileDto } from '../dto/users.dto';
 import { UserProfileResponse } from '../interfaces/users.interface';
+import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 
 @Injectable()
 export class UsersService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<User>,
+    @InjectModel(Relationship.name) private readonly relationshipModel: Model<Relationship>,
   ) {}
 
   // Lấy Profile theo Username (Dành cho việc người khác vào xem tường nhà)
-  async getProfileByUsername(username: string) : Promise<{success: boolean, data: UserProfileResponse}> {
+  async getProfileByUsername(username: string, currentUserId?: string) : Promise<{success: boolean, data: UserProfileResponse}> {
     const user = await this.userModel
       .findOne({ username, isDeleted: false })
       .select('-password -forgotPasswordOtp -forgotPasswordExpiry -refreshToken -isDeleted -deletedAt') // Ẩn triệt để thông tin mật
@@ -23,11 +25,23 @@ export class UsersService {
       throw new NotFoundException('Không tìm thấy người dùng này');
     }
 
+    let isFollowing = false;
+
+    if (currentUserId) {
+        // Kiểm tra xem tôi có đang follow người này không
+        const followRecord = await this.relationshipModel.findOne({
+            followerId: new Types.ObjectId(currentUserId),
+            followingId: user._id
+        });
+        isFollowing = !!followRecord;
+    }
+
+
     // [TỐI ƯU FE] Đổi _id thành id cho Frontend dễ đọc
     const { _id, ...rest } = user;
     return { 
       success: true, 
-      data: { id: _id.toString(), ...rest } 
+      data: { id: _id.toString(), isFollowing, ...rest } 
     };
   }
 

@@ -29,6 +29,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   // Payload là dữ liệu ta đã mã hóa vào token lúc Login
   async validate(payload: any) {
     // Trả về dữ liệu để gán vào req.user
-    return { _id: payload.sub, email: payload.email };
+    return { _id: payload.sub, email: payload.email, username: payload.username };
   }
 }

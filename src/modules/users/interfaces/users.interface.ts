@@ -9,4 +9,5 @@ export interface UserProfileResponse {
   followingCount: number;
   postsCount: number;
   streakCount: number;
+  isFollowing?: boolean
 }

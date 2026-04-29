@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { UsersService } from '../services/users.service';
 import { UpdateProfileDto } from '../dto/users.dto';
+import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
 
 @ApiTags('Users')
 @Controller('users')
@@ -10,9 +11,12 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @ApiOperation({ summary: 'Lấy thông tin cá nhân của người dùng bất kỳ' })
+  @UseGuards(OptionalJwtAuthGuard)
   @Get('profile/:username')
-  async getProfile(@Param('username') username: string) {
-    return this.usersService.getProfileByUsername(username);
+  async getProfile(@Request() req: any, @Param('username') username: string) {
+    // Nếu người dùng có gửi Token (đã login), ta lấy ID của họ, nếu không thì để undefined
+    const currentUserId = req.user?._id; 
+    return this.usersService.getProfileByUsername(username, currentUserId);
   }
 
   @ApiBearerAuth('access-token')
