@@ -28,12 +28,16 @@ export class RelationshipController {
   @ApiOperation({ summary: 'Lấy danh sách người theo dõi mình (Followers)' })
   @Get('followers/:userId')
   async getFollowers(
+    @Request() req: any, // Lấy request để có thông tin user đang đăng nhập
     @Param('userId') userId: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
   ) {
+    const currentUserId = req.user?._id; // Lấy ID của bạn từ Token
+
     return this.relationshipService.getFollowers(
       userId,
+      currentUserId,
       parseInt(page) || 1,
       parseInt(limit) || 20,
     );
@@ -41,12 +45,16 @@ export class RelationshipController {
   @ApiOperation({ summary: 'Lấy danh sách mình đang theo dõi (Following)' })
   @Get('following/:userId')
   async getFollowing(
+    @Request() req: any, // Lấy request để có thông tin user đang đăng nhập
     @Param('userId') userId: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
   ) {
+    const currentUserId = req.user?._id; // Lấy ID của bạn từ Token
+
     return this.relationshipService.getFollowing(
       userId,
+      currentUserId,
       parseInt(page) || 1,
       parseInt(limit) || 20,
     );

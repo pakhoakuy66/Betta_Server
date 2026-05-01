@@ -56,7 +56,7 @@ export class RelationshipService {
   }
 
     // Lấy danh sách Người theo dõi (Followers)
-  async getFollowers(userId: string, page: number = 1, limit: number = 20) {
+  async getFollowers(userId: string, currentUserId?: string, page: number = 1, limit: number = 20) {
     const skip = (page - 1) * limit;
     
     // Tìm tất cả bản ghi có followingId là mình, sau đó "populate" lôi thông tin của người follow ra
@@ -70,15 +70,29 @@ export class RelationshipService {
 
     const total = await this.relationshipModel.countDocuments({ followingId: new Types.ObjectId(userId) });
 
+    // Kiểm tra trạng thái follow hàng loạt để tối ưu hiệu năng
+    let followingIds: string[] = [];
+    if (currentUserId) {
+        const myFollowing = await this.relationshipModel.find({
+            followerId: new Types.ObjectId(currentUserId),
+            followingId: { $in: followers.map(f => (f.followerId as any)._id) }
+        }).select('followingId').lean();
+        
+        followingIds = myFollowing.map(f => f.followingId.toString());
+    }
+
+
     const formattedData = followers.map(rel => {
       const userObj: any = rel.followerId;
+      const targetId = userObj._id.toString();
       return {
-        id: userObj._id.toString(),
+        id: targetId,
         username: userObj.username,
         fullname: userObj.fullname,
         avatar: userObj.avatar,
         bio: userObj.bio,
-        streakCount: userObj.streakCount
+        streakCount: userObj.streakCount,
+        isFollowing: followingIds.includes(targetId), 
       };
     });
 
@@ -90,7 +104,7 @@ export class RelationshipService {
   }
 
   // Lấy danh sách người được theo dõi (Following)
-  async getFollowing(userId: string, page: number = 1, limit: number = 20) {
+  async getFollowing(userId: string, currentUserId?: string, page: number = 1, limit: number = 20) {
     const skip = (page - 1) * limit;
     
     const following = await this.relationshipModel
@@ -103,15 +117,28 @@ export class RelationshipService {
 
     const total = await this.relationshipModel.countDocuments({ followerId: new Types.ObjectId(userId) });
 
-        const formattedData = following.map(rel => {
+    // Kiểm tra trạng thái follow hàng loạt để tối ưu hiệu năng
+    let followingIds: string[] = [];
+    if (currentUserId) {
+        const myFollowing = await this.relationshipModel.find({
+            followerId: new Types.ObjectId(currentUserId),
+            followingId: { $in: following.map(f => (f.followingId as any)._id) }
+        }).select('followingId').lean();
+        
+        followingIds = myFollowing.map(f => f.followingId.toString());
+    }
+
+      const formattedData = following.map(rel => {
       const userObj: any = rel.followingId;
+      const targetId = userObj._id.toString();
       return {
-        id: userObj._id.toString(),
+        id: targetId,
         username: userObj.username,
         fullname: userObj.fullname,
         avatar: userObj.avatar,
         bio: userObj.bio,
-        streakCount: userObj.streakCount
+        streakCount: userObj.streakCount,
+        isFollowing: followingIds.includes(targetId), 
       };
     });
 
