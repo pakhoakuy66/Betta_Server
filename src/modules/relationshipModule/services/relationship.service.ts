@@ -7,6 +7,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
+import { Block } from '../schemas/block.schema';
 
 @Injectable()
 export class RelationshipService {
@@ -14,7 +15,27 @@ export class RelationshipService {
     @InjectModel(Relationship.name)
     private relationshipModel: Model<Relationship>,
     @InjectModel(User.name) private userModel: Model<User>,
+    @InjectModel(Block.name) private blockModel: Model<Block>,
   ) {}
+
+  private async getBlockedUserIds(currentUserId?: string) {
+    if (!currentUserId) return [];
+
+    const currentId = new Types.ObjectId(currentUserId);
+    const blocks = await this.blockModel
+      .find({
+        $or: [{ blockerId: currentId }, { blockedId: currentId }],
+      })
+      .select('blockerId blockedId')
+      .lean();
+
+    return blocks.map((block) => {
+      const blockerId = block.blockerId.toString();
+      return blockerId === currentId.toString()
+        ? block.blockedId
+        : block.blockerId;
+    });
+  }
 
   async followUser(currentUserId: string, targetUserId: string) {
     if (currentUserId === targetUserId) {
@@ -37,6 +58,18 @@ export class RelationshipService {
 
     if (!targetUser) {
       throw new BadRequestException('Người dùng không tồn tại hoặc đã bị xóa');
+    }
+
+    const blockRecord = await this.blockModel.findOne({
+      $or: [
+        { blockerId: followerId, blockedId: targetId },
+        { blockerId: targetId, blockedId: followerId },
+      ],
+    });
+    if (blockRecord) {
+      throw new BadRequestException(
+        'Không thể theo dõi người dùng đang bị chặn hoặc đã chặn bạn',
+      );
     }
 
     // Kiểm tra đã follow chưa
@@ -100,25 +133,9 @@ export class RelationshipService {
   ) {
     const skip = (page - 1) * limit;
     const targetUserId = new Types.ObjectId(userId);
+    const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
-    const followers = await this.relationshipModel
-      .find({ followingId: targetUserId })
-      .populate({
-        path: 'followerId',
-        match: { isDeleted: false },
-        select: 'username fullname avatar bio streakCount isDeleted',
-      })
-      .skip(skip)
-      .limit(limit)
-      .lean()
-      .exec();
-
-    const validFollowers = followers.filter((rel) => {
-      const userObj: any = rel.followerId;
-      return userObj && userObj._id;
-    });
-
-    const totalResult = await this.relationshipModel.aggregate([
+    const activeFollowerStages = [
       { $match: { followingId: targetUserId } },
       {
         $lookup: {
@@ -130,7 +147,32 @@ export class RelationshipService {
       },
       { $unwind: '$followerUser' },
       { $match: { 'followerUser.isDeleted': false } },
-      { $count: 'total' },
+      ...(hiddenUserIds.length > 0
+        ? [{ $match: { 'followerUser._id': { $nin: hiddenUserIds } } }]
+        : []),
+    ];
+
+    const [followers, totalResult] = await Promise.all([
+      this.relationshipModel.aggregate([
+        ...activeFollowerStages,
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $project: {
+            _id: '$followerUser._id',
+            username: '$followerUser.username',
+            fullname: '$followerUser.fullname',
+            avatar: '$followerUser.avatar',
+            bio: '$followerUser.bio',
+            streakCount: '$followerUser.streakCount',
+          },
+        },
+      ]),
+      this.relationshipModel.aggregate([
+        ...activeFollowerStages,
+        { $count: 'total' },
+      ]),
     ]);
 
     const total = totalResult[0]?.total ?? 0;
@@ -141,7 +183,7 @@ export class RelationshipService {
         .find({
           followerId: new Types.ObjectId(currentUserId),
           followingId: {
-            $in: validFollowers.map((f) => (f.followerId as any)._id),
+            $in: followers.map((f) => f._id),
           },
         })
         .select('followingId')
@@ -150,17 +192,16 @@ export class RelationshipService {
       followingIds = myFollowing.map((f) => f.followingId.toString());
     }
 
-    const formattedData = validFollowers.map((rel) => {
-      const userObj: any = rel.followerId;
-      const targetId = userObj._id.toString();
+    const formattedData = followers.map((user) => {
+      const targetId = user._id.toString();
 
       return {
         id: targetId,
-        username: userObj.username,
-        fullname: userObj.fullname,
-        avatar: userObj.avatar,
-        bio: userObj.bio,
-        streakCount: userObj.streakCount,
+        username: user.username,
+        fullname: user.fullname,
+        avatar: user.avatar,
+        bio: user.bio,
+        streakCount: user.streakCount,
         isFollowing: followingIds.includes(targetId),
       };
     });
@@ -187,25 +228,9 @@ export class RelationshipService {
   ) {
     const skip = (page - 1) * limit;
     const targetUserId = new Types.ObjectId(userId);
+    const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
-    const following = await this.relationshipModel
-      .find({ followerId: targetUserId })
-      .populate({
-        path: 'followingId',
-        match: { isDeleted: false },
-        select: 'username fullname avatar bio streakCount isDeleted',
-      })
-      .skip(skip)
-      .limit(limit)
-      .lean()
-      .exec();
-
-    const validFollowing = following.filter((rel) => {
-      const userObj: any = rel.followingId;
-      return userObj && userObj._id;
-    });
-
-    const totalResult = await this.relationshipModel.aggregate([
+    const activeFollowingStages = [
       { $match: { followerId: targetUserId } },
       {
         $lookup: {
@@ -217,7 +242,32 @@ export class RelationshipService {
       },
       { $unwind: '$followingUser' },
       { $match: { 'followingUser.isDeleted': false } },
-      { $count: 'total' },
+      ...(hiddenUserIds.length > 0
+        ? [{ $match: { 'followingUser._id': { $nin: hiddenUserIds } } }]
+        : []),
+    ];
+
+    const [following, totalResult] = await Promise.all([
+      this.relationshipModel.aggregate([
+        ...activeFollowingStages,
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $project: {
+            _id: '$followingUser._id',
+            username: '$followingUser.username',
+            fullname: '$followingUser.fullname',
+            avatar: '$followingUser.avatar',
+            bio: '$followingUser.bio',
+            streakCount: '$followingUser.streakCount',
+          },
+        },
+      ]),
+      this.relationshipModel.aggregate([
+        ...activeFollowingStages,
+        { $count: 'total' },
+      ]),
     ]);
 
     const total = totalResult[0]?.total ?? 0;
@@ -228,7 +278,7 @@ export class RelationshipService {
         .find({
           followerId: new Types.ObjectId(currentUserId),
           followingId: {
-            $in: validFollowing.map((f) => (f.followingId as any)._id),
+            $in: following.map((f) => f._id),
           },
         })
         .select('followingId')
@@ -237,17 +287,16 @@ export class RelationshipService {
       followingIds = myFollowing.map((f) => f.followingId.toString());
     }
 
-    const formattedData = validFollowing.map((rel) => {
-      const userObj: any = rel.followingId;
-      const targetId = userObj._id.toString();
+    const formattedData = following.map((user) => {
+      const targetId = user._id.toString();
 
       return {
         id: targetId,
-        username: userObj.username,
-        fullname: userObj.fullname,
-        avatar: userObj.avatar,
-        bio: userObj.bio,
-        streakCount: userObj.streakCount,
+        username: user.username,
+        fullname: user.fullname,
+        avatar: user.avatar,
+        bio: user.bio,
+        streakCount: user.streakCount,
         isFollowing: followingIds.includes(targetId),
       };
     });
