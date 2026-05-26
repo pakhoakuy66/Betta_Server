@@ -4,6 +4,7 @@ import { Relationship, RelationshipSchema } from './schemas/relationship.schema'
 import { RelationshipController } from './controllers/relationship.controller';
 import { RelationshipService } from './services/relationship.service';
 import { User, UserSchema } from '../users/schemas/user.schema';
+import { Block, BlockSchema } from './schemas/block.schema';
 
 @Module({
   // Import cả schema User và Relationship để Service có thể truy vấn cả hai
@@ -11,6 +12,7 @@ import { User, UserSchema } from '../users/schemas/user.schema';
     MongooseModule.forFeature([
       { name: Relationship.name, schema: RelationshipSchema },
       { name: User.name, schema: UserSchema },
+      { name: Block.name, schema: BlockSchema },
     ]),
   ],
   controllers: [RelationshipController],
