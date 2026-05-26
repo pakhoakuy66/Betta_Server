@@ -60,7 +60,7 @@ export class AuthService {
     @InjectModel(User.name) private readonly userModel: Model<User>,
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
-  ) {}
+  ) { }
 
   // ─────────────────────────────────────────────
   // PRIVATE HELPERS
@@ -78,11 +78,14 @@ export class AuthService {
 
   private toPublicUser(user: User) {
     return {
-      _id: user._id.toString(),
+      id: user._id.toString(),
       username: user.username,
       fullname: user.fullname,
+      email: user.email,
+      phone: user.phone,
       avatar: user.avatar ?? null,
       streakCount: user.streakCount ?? 0,
+      status: user.status ?? 'active',
     };
   }
 
@@ -91,7 +94,11 @@ export class AuthService {
   // ─────────────────────────────────────────────
 
   async register(body: RegisterDto): Promise<RegisterResponse> {
-    const { username, fullname, phone, email, password } = body;
+    const username = body.username.trim();
+    const fullname = body.fullname.trim();
+    const phone = body.phone.trim();
+    const email = body.email.trim().toLowerCase();
+    const password = body.password;
 
     const duplicate = await this.userModel
       .findOne({ $or: [{ username }, { email }, { phone }] })
@@ -143,7 +150,8 @@ export class AuthService {
   // ─────────────────────────────────────────────
 
   async login(body: LoginDto): Promise<AuthResponse> {
-    const { email, password } = body;
+    const email = body.email.trim().toLowerCase();
+    const password = body.password;
 
     const user = await this.userModel
       .findOne({ email, isDeleted: false })
@@ -151,7 +159,7 @@ export class AuthService {
       .exec();
 
     const DUMMY_HASH =
-      '$2b$12$invalidhashfortimingattackprevention000000000000000';
+      '$2b$12$CwTycUXWue0Thq9StjUM0uJ8xgOguJdyQh7fXxH4ILhYo8sHpItCu';
     const passwordToCheck = user?.password ?? DUMMY_HASH;
     const isPasswordValid = await bcrypt.compare(password, passwordToCheck);
 
@@ -160,7 +168,7 @@ export class AuthService {
     }
 
     const access_token = this.generateToken(user);
-    
+
     // Tạo Refresh Token sống dài (7 ngày)
     const refresh_token = this.jwtService.sign(
       { sub: user._id },
@@ -183,9 +191,11 @@ export class AuthService {
 
   // BƯỚC 1: Gửi OTP
   async forgotPassword(body: ForgotPasswordDto) {
+    const email = body.email.trim().toLowerCase();
+
     const user = await this.userModel
       .findOne({
-        email: body.email,
+        email,
         isDeleted: false,
       })
       .select('+forgotPasswordOtp +forgotPasswordExpiry'); // Lấy thêm các trường ẩn
@@ -204,7 +214,7 @@ export class AuthService {
       // Cách dễ nhất: Lấy (Thời điểm hết hạn - 3 phút) + 60 giây.
       const lastSentAt = new Date(
         user.forgotPasswordExpiry.getTime() -
-          this.OTP_EXPIRY_MINUTES * 60 * 1000,
+        this.OTP_EXPIRY_MINUTES * 60 * 1000,
       );
       const secondsPassed = Math.floor(
         (now.getTime() - lastSentAt.getTime()) / 1000,
@@ -242,9 +252,10 @@ export class AuthService {
 
   // BƯỚC 2: Verify OTP
   async verifyOtp(body: VerifyOtpDto) {
+    const email = body.email.trim().toLowerCase();
     const user = await this.userModel
       .findOne({
-        email: body.email,
+        email,
         forgotPasswordOtp: body.otp,
         isDeleted: false,
       })
@@ -325,7 +336,7 @@ export class AuthService {
     try {
       // 1. Verify xem token còn hạn không
       const decoded = this.jwtService.verify(refreshToken);
-      
+
       // 2. Tìm user và check xem token có khớp DB không (Chống thu hồi)
       const user = await this.userModel.findById(decoded.sub);
       if (!user || user.refreshToken !== refreshToken || user.isDeleted) {

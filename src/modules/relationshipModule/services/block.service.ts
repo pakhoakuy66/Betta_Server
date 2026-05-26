@@ -51,22 +51,47 @@ export class BlockService {
   }
 
   async unblockUser(currentUserId: string, targetUserId: string) {
-    const deleted = await this.blockModel.findOneAndDelete({
-      blockerId: new Types.ObjectId(currentUserId),
-      blockedId: new Types.ObjectId(targetUserId),
-    });
+    // SENIOR CHECK: Kiểm tra dữ liệu đầu vào
+    if (!targetUserId || targetUserId === 'undefined') {
+      throw new BadRequestException('ID người dùng không hợp lệ');
+    }
 
-    if (!deleted) throw new BadRequestException('Bạn chưa chặn người dùng này');
-    return { success: true, message: 'Đã bỏ chặn người dùng' };
+    try {
+      const deleted = await this.blockModel.findOneAndDelete({
+        blockerId: new Types.ObjectId(currentUserId),
+        blockedId: new Types.ObjectId(targetUserId), // Lỗi xảy ra tại đây nếu targetUserId sai
+      });
+      if (!deleted)
+        throw new BadRequestException('Bạn chưa chặn người dùng này');
+      return { success: true, message: 'Đã bỏ chặn người dùng' };
+    } catch (error) {
+      // Nếu ID không đúng định dạng hex 24 ký tự, Mongoose sẽ throw lỗi BSON
+      throw new BadRequestException('Định dạng ID người dùng không hợp lệ');
+    }
   }
 
   async getBlockedUsers(userId: string) {
     const blocks = await this.blockModel
       .find({ blockerId: new Types.ObjectId(userId) })
-      .populate('blockedId', 'username fullname avatar')
+      .populate('blockedId', 'username fullname avatar streakCount')
       .lean()
       .exec();
 
-    return { success: true, data: blocks.map((b) => b.blockedId) };
+    const formattedData = blocks
+      .map((b: any) => {
+        const user = b.blockedId;
+        if (!user) return null;
+
+        return {
+          id: user._id.toString(), // Chuyển _id thành id (string)
+          username: user.username,
+          fullname: user.fullname,
+          avatar: user.avatar,
+          streakCount: user.streakCount,
+        };
+      })
+      .filter(Boolean); // Loại bỏ các bản ghi lỗi nếu user bị xóa
+
+    return { success: true, data: formattedData };
   }
 }

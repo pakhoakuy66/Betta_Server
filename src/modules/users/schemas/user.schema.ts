@@ -9,11 +9,17 @@ export class User extends Document {
   @Prop({ type: String, required: true })
   fullname!: string;
 
-  @Prop({ type: String, required: true, unique: true, index: true })
+  @Prop({ type: String, required: true, unique: true, index: true, trim: true })
   phone!: string;
 
-  @Prop({ type: String, required: true, unique: true, index: true })
-  email!: string; 
+  @Prop({ 
+    type: String, 
+    required: true, 
+    unique: true, 
+    index: true, 
+    trim: true, 
+    lowercase: true })
+  email!: string;
 
   @Prop({ type: String, required: true })
   password!: string;
