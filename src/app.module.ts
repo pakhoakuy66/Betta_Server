@@ -11,6 +11,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { ReportsModule } from './modules/reports/reports.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { UsersModule } from './modules/users/users.module';
+import { RelationshipModule } from './modules/relationshipModule/relationship.module';
+import { BlockModule } from './modules/relationshipModule/block.module';
 
 @Module({
   imports: [
@@ -32,7 +34,9 @@ import { UsersModule } from './modules/users/users.module';
     NotificationsModule, 
     ReportsModule, 
     UploadsModule, 
-    UsersModule
+    UsersModule,
+    RelationshipModule,
+    BlockModule
   ],
   controllers: [AppController],
   providers: [AppService],

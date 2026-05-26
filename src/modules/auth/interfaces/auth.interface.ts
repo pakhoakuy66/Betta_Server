@@ -7,11 +7,14 @@ export interface TokenPayload {
 }
 
 export interface PublicUser {
-  _id: string;
+  id: string;
   username: string;
   fullname: string;
+  email: string;
+  phone: string;
   avatar: string | null;
   streakCount: number;
+  status: string;
 }
 
 export interface AuthResponse {
