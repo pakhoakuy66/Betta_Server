@@ -3,6 +3,15 @@ import { Document } from 'mongoose';
 
 @Schema({ timestamps: true }) // Tự động thêm createdAt, updatedAt
 export class User extends Document {
+  @Prop({
+    type: String,
+    unique: true,
+    index: true,
+    sparse: true,
+    trim: true,
+  })
+  publicId?: string;
+
   @Prop({ type: String, required: true, unique: true, index: true })
   username!: string;
 
@@ -12,13 +21,14 @@ export class User extends Document {
   @Prop({ type: String, required: true, unique: true, index: true, trim: true })
   phone!: string;
 
-  @Prop({ 
-    type: String, 
-    required: true, 
-    unique: true, 
-    index: true, 
-    trim: true, 
-    lowercase: true })
+  @Prop({
+    type: String,
+    required: true,
+    unique: true,
+    index: true,
+    trim: true,
+    lowercase: true,
+  })
   email!: string;
 
   @Prop({ type: String, required: true })

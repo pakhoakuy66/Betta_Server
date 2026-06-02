@@ -12,6 +12,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { MailService } from './mail.service';
+import { generateUserPublicId } from '../../users/utils/generate-public-id';
 import { User } from '../../users/schemas/user.schema';
 import {
   RegisterDto,
@@ -39,6 +40,7 @@ interface MongoError {
   code?: number;
   stack?: string;
   message?: string;
+  keyPattern?: Record<string, number>;
 }
 
 function toMongoError(err: unknown): MongoError {
@@ -60,7 +62,7 @@ export class AuthService {
     @InjectModel(User.name) private readonly userModel: Model<User>,
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
-  ) { }
+  ) {}
 
   // ─────────────────────────────────────────────
   // PRIVATE HELPERS
@@ -79,6 +81,7 @@ export class AuthService {
   private toPublicUser(user: User) {
     return {
       id: user._id.toString(),
+      publicId: user.publicId,
       username: user.username,
       fullname: user.fullname,
       email: user.email,
@@ -87,6 +90,38 @@ export class AuthService {
       streakCount: user.streakCount ?? 0,
       status: user.status ?? 'active',
     };
+  }
+
+  private async createUserWithPublicId(data: {
+    username: string;
+    fullname: string;
+    phone: string;
+    email: string;
+    password: string;
+  }) {
+    const MAX_PUBLIC_ID_RETRIES = 5;
+
+    for (let attempt = 1; attempt <= MAX_PUBLIC_ID_RETRIES; attempt += 1) {
+      try {
+        return await this.userModel.create({
+          ...data,
+          publicId: generateUserPublicId(),
+        });
+      } catch (err: unknown) {
+        const error = toMongoError(err);
+
+        // NanoID collision rất hiếm, nhưng production vẫn phải xử lý bằng unique index + retry.
+        if (error.code === 11000 && error.keyPattern?.publicId) {
+          continue;
+        }
+
+        throw err;
+      }
+    }
+
+    throw new InternalServerErrorException(
+      'Không thể tạo mã người dùng, vui lòng thử lại',
+    );
   }
 
   // ─────────────────────────────────────────────
@@ -118,7 +153,7 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
     try {
-      await this.userModel.create({
+      await this.createUserWithPublicId({
         username,
         fullname,
         phone,
@@ -214,7 +249,7 @@ export class AuthService {
       // Cách dễ nhất: Lấy (Thời điểm hết hạn - 3 phút) + 60 giây.
       const lastSentAt = new Date(
         user.forgotPasswordExpiry.getTime() -
-        this.OTP_EXPIRY_MINUTES * 60 * 1000,
+          this.OTP_EXPIRY_MINUTES * 60 * 1000,
       );
       const secondsPassed = Math.floor(
         (now.getTime() - lastSentAt.getTime()) / 1000,
@@ -340,7 +375,9 @@ export class AuthService {
       // 2. Tìm user và check xem token có khớp DB không (Chống thu hồi)
       const user = await this.userModel.findById(decoded.sub);
       if (!user || user.refreshToken !== refreshToken || user.isDeleted) {
-        throw new UnauthorizedException('Refresh token không hợp lệ hoặc đã bị thu hồi');
+        throw new UnauthorizedException(
+          'Refresh token không hợp lệ hoặc đã bị thu hồi',
+        );
       }
 
       // 3. Cấp cặp token mới để liên tục cuốn chiếu (Refresh Token Rotation)
@@ -359,7 +396,9 @@ export class AuthService {
         refresh_token: new_refresh_token,
       };
     } catch (err) {
-      throw new UnauthorizedException('Refresh token không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.');
+      throw new UnauthorizedException(
+        'Refresh token không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.',
+      );
     }
   }
 }
