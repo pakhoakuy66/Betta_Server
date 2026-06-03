@@ -72,7 +72,6 @@ export class UsersService {
       success: true,
       data: {
         id: _id.toString(),
-        publicId: rest.publicId,
         isFollowing,
         isBlocked: false,
         ...rest,

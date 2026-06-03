@@ -8,7 +8,7 @@ export interface TokenPayload {
 
 export interface PublicUser {
   id: string;
-  publicId?: string;
+  publicId: string;
   username: string;
   fullname: string;
   email: string;

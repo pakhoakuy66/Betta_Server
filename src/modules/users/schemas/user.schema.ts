@@ -5,12 +5,12 @@ import { Document } from 'mongoose';
 export class User extends Document {
   @Prop({
     type: String,
+    required: true,
     unique: true,
     index: true,
-    sparse: true,
     trim: true,
   })
-  publicId?: string;
+  publicId!: string;
 
   @Prop({ type: String, required: true, unique: true, index: true })
   username!: string;
