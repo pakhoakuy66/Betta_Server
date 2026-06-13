@@ -161,6 +161,7 @@ export class RelationshipService {
         {
           $project: {
             _id: '$followerUser._id',
+            publicId: '$followerUser.publicId',
             username: '$followerUser.username',
             fullname: '$followerUser.fullname',
             avatar: '$followerUser.avatar',
@@ -197,6 +198,7 @@ export class RelationshipService {
 
       return {
         id: targetId,
+        publicId: user.publicId,
         username: user.username,
         fullname: user.fullname,
         avatar: user.avatar,
@@ -256,6 +258,7 @@ export class RelationshipService {
         {
           $project: {
             _id: '$followingUser._id',
+            publicId: '$followingUser.publicId',
             username: '$followingUser.username',
             fullname: '$followingUser.fullname',
             avatar: '$followingUser.avatar',
@@ -292,6 +295,7 @@ export class RelationshipService {
 
       return {
         id: targetId,
+        publicId: user.publicId,
         username: user.username,
         fullname: user.fullname,
         avatar: user.avatar,

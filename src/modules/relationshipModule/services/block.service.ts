@@ -73,7 +73,10 @@ export class BlockService {
   async getBlockedUsers(userId: string) {
     const blocks = await this.blockModel
       .find({ blockerId: new Types.ObjectId(userId) })
-      .populate('blockedId', 'username fullname avatar streakCount')
+      .populate(
+        'blockedId',
+        'publicId username fullname avatar streakCount isDeleted',
+      )
       .lean()
       .exec();
 
@@ -81,9 +84,11 @@ export class BlockService {
       .map((b: any) => {
         const user = b.blockedId;
         if (!user) return null;
+        if (user.isDeleted) return null;
 
         return {
           id: user._id.toString(), // Chuyển _id thành id (string)
+          publicId: user.publicId,
           username: user.username,
           fullname: user.fullname,
           avatar: user.avatar,
