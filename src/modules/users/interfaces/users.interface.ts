@@ -1,6 +1,6 @@
 export interface UserProfileResponse {
   id: string;
-  publicId?: string;
+  publicId: string;
   username: string;
   fullname: string;
   avatar: string;

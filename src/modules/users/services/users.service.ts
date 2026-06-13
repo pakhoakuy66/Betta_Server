@@ -152,8 +152,13 @@ export class UsersService {
         isDeleted: true,
         deletedAt: new Date(),
         status: 'banned',
+        refreshToken: null, // null vì field này vẫn cần tồn tại để check
         followersCount: 0, // Reset luôn bộ đếm của tài khoản bị xóa về 0
         followingCount: 0, // Reset luôn bộ đếm của tài khoản bị xóa về 0
+      },
+      $unset: {
+        forgotPasswordOtp: '',
+        forgotPasswordExpiry: '', // xóa hẳn vì không cần giữ field
       },
     });
 

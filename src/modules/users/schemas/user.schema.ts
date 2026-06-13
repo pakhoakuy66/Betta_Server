@@ -86,8 +86,12 @@ export class User extends Document {
   @Prop({ type: Date, select: false })
   forgotPasswordExpiry?: Date;
 
+  // Feild đếm số lần nhập sai OTP
+  @Prop({ type: Number, default: 0, select: false })
+  forgotPasswordAttempts?: number;
+
   // Xử lý Refresh Token (Chuẩn Doanh Nghiệp)
-  @Prop({ type: String, default: null })
+  @Prop({ type: String, default: null, select: false })
   refreshToken?: string | null;
 }
 
