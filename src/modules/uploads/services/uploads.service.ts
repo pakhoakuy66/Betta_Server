@@ -87,9 +87,16 @@ export class UploadsService {
     if (!publicId) return;
 
     try {
-      await cloudinary.uploader.destroy(publicId, {
+      const result = await cloudinary.uploader.destroy(publicId, {
         resource_type: 'image',
+        invalidate: true,
       });
+
+      if (result.result !== 'ok' && result.result !== 'not found') {
+        this.logger.warn(
+          `Unexpected Cloudinary delete result for ${publicId}: ${result.result}`,
+        );
+      }
     } catch (err: unknown) {
       // Không throw để tránh làm hỏng flow xóa post nếu Cloudinary lỗi tạm thời.
       // Sau này có thể thay bằng logger hoặc retry queue.
