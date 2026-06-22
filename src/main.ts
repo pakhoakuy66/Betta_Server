@@ -1,10 +1,25 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  const configService = app.get(ConfigService);
+  const trustProxyHops = Number(
+    configService.get<string>('TRUST_PROXY_HOPS') ?? 0,
+  );
+
+  if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
+    throw new Error('TRUST_PROXY_HOPS phải là số nguyên không âm');
+  }
+
+  if (trustProxyHops > 0) {
+    const expressApp = app.getHttpAdapter().getInstance();
+    expressApp.set('trust proxy', trustProxyHops);
+  }
 
   // 1. Kích hoạt Logger (Công cụ ghi chép hệ thống siêu cấp của Nest)
   const logger = new Logger('BettaSystem');
