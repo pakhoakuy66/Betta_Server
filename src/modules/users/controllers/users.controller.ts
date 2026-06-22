@@ -50,12 +50,12 @@ export class UsersController {
     return this.usersService.softDeleteUser(userId);
   }
 
-  @ApiOperation({
-    summary: 'Admin thực hiện xóa mềm/banned tài khoản user khác',
-  })
-  // @UseGuards(AdminGuard) // Nếu sau này bạn có viết file bảo vệ quyền Admin thì mở dòng này ra
-  @Delete(':id') // Đường dẫn API sẽ là: DELETE /users/ID_CỦA_USER_CẦN_XÓA
-  async deleteUserByAdmin(@Param('id') userId: string) {
-    return this.usersService.softDeleteUser(userId);
-  }
+  // @ApiOperation({
+  //   summary: 'Admin thực hiện xóa mềm/banned tài khoản user khác',
+  // })
+  // // @UseGuards(AdminGuard) // Nếu sau này bạn có viết file bảo vệ quyền Admin thì mở dòng này ra
+  // @Delete(':id') // Đường dẫn API sẽ là: DELETE /users/ID_CỦA_USER_CẦN_XÓA
+  // async deleteUserByAdmin(@Param('id') userId: string) {
+  //   return this.usersService.softDeleteUser(userId);
+  // }
 }
