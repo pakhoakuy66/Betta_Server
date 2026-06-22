@@ -1,6 +1,8 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -12,7 +14,10 @@ import {
   UploadsService,
 } from '../../uploads/services/uploads.service';
 import { CreatePostDto } from '../dto/create-post.dto';
-import { generatePostPublicId } from '../utils/generate-post-public-id';
+import {
+  generatePostPublicId,
+  isValidPostPublicId,
+} from '../utils/generate-post-public-id';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { FeedQueryDto } from '../dto/post-query.dto';
@@ -29,17 +34,19 @@ type MongoDuplicateError = {
   keyPattern?: Record<string, number>;
 };
 
-type FeedAuthor = {
+type PostAuthor = {
   _id: Types.ObjectId;
   publicId: string;
   username: string;
   fullname: string;
-  avatar?: string | null;
-  streakCount?: number;
+  avatar: string | null;
+  streakCount: number;
 };
 
 @Injectable()
 export class PostsService {
+  private readonly logger = new Logger(PostsService.name);
+
   constructor(
     @InjectModel(Post.name) private readonly postModel: Model<Post>,
     @InjectModel(User.name) private readonly userModel: Model<User>,
@@ -125,6 +132,66 @@ export class PostsService {
     }
   }
 
+  async deletePost(currentUserId: string, publicId: string) {
+    if (!Types.ObjectId.isValid(currentUserId)) {
+      throw new BadRequestException('User ID không hợp lệ');
+    }
+
+    if (!isValidPostPublicId(publicId)) {
+      throw new NotFoundException('Bài viết không tồn tại');
+    }
+
+    const currentObjectId = new Types.ObjectId(currentUserId);
+
+    const currentUser = await this.userModel
+      .findOne({
+        _id: currentObjectId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!currentUser) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    /*
+     * authorId nằm trong filter để đảm bảo chỉ chủ bài viết mới xóa được.
+     * Trả cùng một lỗi 404 cho post không tồn tại và post không thuộc sở hữu,
+     * tránh làm lộ tài nguyên của user khác.
+     */
+    const deletedPost = await this.postModel
+      .findOneAndDelete({
+        publicId,
+        authorId: currentObjectId,
+      })
+      .exec();
+
+    if (!deletedPost) {
+      throw new NotFoundException(
+        'Bài viết không tồn tại hoặc bạn không có quyền xóa',
+      );
+    }
+
+    await this.decrementPostCount(currentObjectId);
+
+    /*
+     * Post đã bị xóa khỏi MongoDB trước khi cleanup Cloudinary.
+     * Nếu Cloudinary lỗi, UploadsService sẽ log lỗi nhưng không làm post xuất
+     * hiện trở lại hoặc khiến client hiểu nhầm rằng thao tác xóa thất bại.
+     */
+    await this.uploadsService.deleteImages(
+      deletedPost.images.map((image) => image.publicId),
+    );
+
+    return {
+      success: true,
+      message: 'Xóa bài viết thành công',
+    };
+  }
+
   async getFeed(currentUserId: string, query: FeedQueryDto) {
     if (!Types.ObjectId.isValid(currentUserId)) {
       throw new BadRequestException('User ID không hợp lệ');
@@ -192,7 +259,7 @@ export class PostsService {
       .exec();
 
     const activeAuthorIds = activeAuthors.map((author) => author._id);
-    const authorMap = new Map<string, FeedAuthor>(
+    const authorMap = new Map<string, PostAuthor>(
       activeAuthors.map((author) => [
         author._id.toString(),
         {
@@ -228,6 +295,104 @@ export class PostsService {
         limit,
         hasMore,
       },
+    };
+  }
+
+  async getPostDetail(currentUserId: string, publicId: string) {
+    if (!Types.ObjectId.isValid(currentUserId)) {
+      throw new BadRequestException('User ID không hợp lệ');
+    }
+
+    if (!isValidPostPublicId(publicId)) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    const currentObjectId = new Types.ObjectId(currentUserId);
+
+    const [currentUser, post] = await Promise.all([
+      this.userModel
+        .findOne({
+          _id: currentObjectId,
+          isDeleted: false,
+          status: 'active',
+        })
+        .select('_id')
+        .lean()
+        .exec(),
+
+      this.postModel
+        .findOne({
+          publicId,
+          expireAt: { $gt: new Date() },
+          isDeletedByAdmin: false,
+        })
+        .exec(),
+    ]);
+
+    if (!currentUser) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    if (!post) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    const isOwner = post.authorId.toString() === currentUserId;
+
+    const [author, blockRecord] = await Promise.all([
+      this.userModel
+        .findOne({
+          _id: post.authorId,
+          isDeleted: false,
+          status: 'active',
+        })
+        .select('_id publicId username fullname avatar streakCount')
+        .lean()
+        .exec(),
+
+      this.blockModel
+        .findOne({
+          $or: [
+            { blockerId: currentObjectId, blockedId: post.authorId },
+            { blockerId: post.authorId, blockedId: currentObjectId },
+          ],
+        })
+        .select('_id')
+        .lean()
+        .exec(),
+    ]);
+
+    if (!author || blockRecord) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    if (!isOwner) {
+      const relationship = await this.relationshipModel
+        .findOne({
+          followerId: currentObjectId,
+          followingId: post.authorId,
+        })
+        .select('_id')
+        .lean()
+        .exec();
+
+      if (!relationship) {
+        throw new ForbiddenException(
+          'Bạn cần theo dõi người dùng này để xem bài viết',
+        );
+      }
+    }
+
+    return {
+      success: true,
+      data: this.toPostDetailResponse(post, {
+        _id: author._id,
+        publicId: author.publicId,
+        username: author.username,
+        fullname: author.fullname,
+        avatar: author.avatar ?? null,
+        streakCount: author.streakCount ?? 0,
+      }),
     };
   }
 
@@ -280,7 +445,39 @@ export class PostsService {
     };
   }
 
-  private toFeedPostResponse(post: Post, authorMap: Map<string, FeedAuthor>) {
+  private async decrementPostCount(userId: Types.ObjectId): Promise<void> {
+  try {
+    const result = await this.userModel
+      .updateOne(
+        {
+          _id: userId,
+          postsCount: { $gt: 0 },
+        },
+        {
+          $inc: { postsCount: -1 },
+        },
+      )
+      .exec();
+
+    if (result.matchedCount === 0) {
+      this.logger.warn(
+        `postsCount was not decremented for user ${userId.toString()}: user not found or postsCount already equals 0`,
+      );
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    /*
+     * Post đã được xóa thành công. Không trả 500 vì postsCount là dữ liệu
+     * denormalized và có thể được đồng bộ lại bằng maintenance job.
+     */
+    this.logger.warn(
+      `Failed to decrement postsCount for user ${userId.toString()}: ${message}`,
+    );
+  }
+}
+
+  private toFeedPostResponse(post: Post, authorMap: Map<string, PostAuthor>) {
     const author = authorMap.get(post.authorId.toString());
 
     return {
@@ -305,6 +502,31 @@ export class PostsService {
             streakCount: author.streakCount ?? 0,
           }
         : null,
+    };
+  }
+
+  private toPostDetailResponse(post: Post, author: PostAuthor) {
+    return {
+      id: post.publicId,
+      publicId: post.publicId,
+      content: post.content,
+      images: post.images.map((image) => ({
+        url: image.url,
+        publicId: image.publicId,
+      })),
+      likeCount: post.likeCount,
+      shareCount: post.shareCount,
+      expireAt: post.expireAt,
+      createdAt: post.get('createdAt') as Date,
+      updatedAt: post.get('updatedAt') as Date,
+      author: {
+        id: author._id.toString(),
+        publicId: author.publicId,
+        username: author.username,
+        fullname: author.fullname,
+        avatar: author.avatar,
+        streakCount: author.streakCount,
+      },
     };
   }
 }

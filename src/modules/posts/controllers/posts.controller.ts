@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
   Post,
   Query,
   Request,
@@ -73,5 +75,27 @@ export class PostsController {
     @Query() query: FeedQueryDto,
   ) {
     return this.postsService.getFeed(req.user._id, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Lấy chi tiết bài viết theo publicId' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get(':publicId')
+  async getPostDetail(
+    @Request() req: AuthenticatedRequest,
+    @Param('publicId') publicId: string,
+  ) {
+    return this.postsService.getPostDetail(req.user._id, publicId);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Xóa bài viết của chính mình theo publicId' })
+  @UseGuards(AuthGuard('jwt'))
+  @Delete(':publicId')
+  async deletePost(
+    @Request() req: AuthenticatedRequest,
+    @Param('publicId') publicId: string,
+  ) {
+    return this.postsService.deletePost(req.user._id, publicId);
   }
 }
