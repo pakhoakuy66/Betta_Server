@@ -6,10 +6,12 @@ import {
   BadRequestException,
   InternalServerErrorException,
   Logger,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { MailService } from './mail.service';
@@ -35,6 +37,19 @@ const BCRYPT_ROUNDS = 12;
 const REFRESH_TOKEN_HASH_ROUNDS = 10;
 const OTP_HASH_ROUNDS = 8;
 const MAX_OTP_VERIFY_ATTEMPTS = 5;
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCK_DURATION_MS = 15 * 60 * 1000;
+const LOGIN_FAILURE_WINDOW_MS = 30 * 60 * 1000;
+const GENERIC_FORGOT_PASSWORD_RESPONSE = {
+  success: true,
+  message: 'Nếu email hợp lệ, mã OTP sẽ được gửi đến địa chỉ đã đăng ký.',
+};
+
+const INVALID_LOGIN_MESSAGE = 'Email hoặc mật khẩu không chính xác';
+
+// Hash giả có cùng bcrypt cost với mật khẩu thật để hạn chế dò email bằng timing.
+const DUMMY_PASSWORD_HASH =
+  '$2b$12$CwTycUXWue0Thq9StjUM0uJ8xgOguJdyQh7fXxH4ILhYo8sHpItCu';
 
 type RefreshTokenPayload = {
   sub: string;
@@ -157,9 +172,168 @@ export class AuthService {
     }
   }
 
+  private isLoginLocked(
+    user: Pick<User, 'lockedUntil'>,
+    now: Date,
+  ): user is Pick<User, 'lockedUntil'> & { lockedUntil: Date } {
+    return Boolean(
+      user.lockedUntil && user.lockedUntil.getTime() > now.getTime(),
+    );
+  }
+
+  private throwLoginLocked(lockedUntil: Date): never {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((lockedUntil.getTime() - Date.now()) / 1000),
+    );
+
+    throw new HttpException(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        message:
+          'Quá nhiều lần đăng nhập không thành công. Vui lòng thử lại sau.',
+        retryAfterSeconds,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+
+  private async recordFailedLoginAttempt(
+    userId: Types.ObjectId,
+    now: Date,
+  ): Promise<Date | null> {
+    const lockedUntil = new Date(now.getTime() + LOGIN_LOCK_DURATION_MS);
+    const failureWindowThreshold = new Date(
+      now.getTime() - LOGIN_FAILURE_WINDOW_MS,
+    );
+
+    /*
+     * Bắt đầu cửa sổ mới khi:
+     * - User chưa từng đăng nhập sai.
+     * - Cửa sổ 30 phút trước đã hết.
+     * - Tài khoản vừa hết thời gian khóa.
+     */
+    const shouldStartNewWindow = {
+      $or: [
+        {
+          $lte: [
+            {
+              $ifNull: ['$failedLoginWindowStartedAt', new Date(0)],
+            },
+            failureWindowThreshold,
+          ],
+        },
+        {
+          $and: [
+            {
+              $ne: [{ $ifNull: ['$lockedUntil', null] }, null],
+            },
+            { $lte: ['$lockedUntil', now] },
+          ],
+        },
+      ],
+    };
+
+    const updatedUser = await this.userModel
+      .findOneAndUpdate(
+        {
+          _id: userId,
+          isDeleted: false,
+          status: { $ne: 'banned' },
+
+          // Request trong lúc đang khóa không được kéo dài thời gian khóa.
+          $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+        },
+        [
+          {
+            $set: {
+              failedLoginAttempts: {
+                $cond: [
+                  shouldStartNewWindow,
+                  1,
+                  {
+                    $add: [
+                      {
+                        $ifNull: ['$failedLoginAttempts', 0],
+                      },
+                      1,
+                    ],
+                  },
+                ],
+              },
+              failedLoginWindowStartedAt: {
+                $cond: [
+                  shouldStartNewWindow,
+                  now,
+                  '$failedLoginWindowStartedAt',
+                ],
+              },
+            },
+          },
+          {
+            $set: {
+              lockedUntil: {
+                $cond: [
+                  {
+                    $gte: ['$failedLoginAttempts', MAX_FAILED_LOGIN_ATTEMPTS],
+                  },
+                  lockedUntil,
+                  '$$REMOVE',
+                ],
+              },
+            },
+          },
+        ],
+        {
+          new: true,
+          updatePipeline: true,
+        },
+      )
+      .select('+failedLoginAttempts +failedLoginWindowStartedAt +lockedUntil')
+      .exec();
+
+    /*
+     * Trường hợp nhiều request đồng thời: một request khác có thể đã khóa
+     * tài khoản trước khi update này chạy. Chỉ query bổ sung ở race case.
+     */
+    if (!updatedUser) {
+      const currentLock = await this.userModel
+        .findOne({
+          _id: userId,
+          isDeleted: false,
+        })
+        .select('+lockedUntil')
+        .lean()
+        .exec();
+
+      return currentLock?.lockedUntil &&
+        currentLock.lockedUntil.getTime() > now.getTime()
+        ? currentLock.lockedUntil
+        : null;
+    }
+
+    const activeLockedUntil =
+      updatedUser.lockedUntil &&
+      updatedUser.lockedUntil.getTime() > now.getTime()
+        ? updatedUser.lockedUntil
+        : null;
+
+    if (activeLockedUntil) {
+      this.logger.warn(
+        `Account temporarily locked after repeated login failures: ${userId}`,
+      );
+    }
+
+    return activeLockedUntil;
+  }
+
   private generateOtpCode(): string {
     // crypto.randomInt phù hợp hơn Math.random cho OTP bảo mật.
     return randomInt(100000, 1000000).toString();
+  }
+
+  private async performDummyOtpHash(): Promise<void> {
+    await this.hashOtp(this.generateOtpCode());
   }
 
   private async hashOtp(otp: string): Promise<string> {
@@ -238,39 +412,108 @@ export class AuthService {
   async login(body: LoginDto): Promise<AuthResponse> {
     const email = body.email.trim().toLowerCase();
     const password = body.password;
+    const now = new Date();
 
     const user = await this.userModel
-      .findOne({ email, isDeleted: false })
-      .select('+password')
+      .findOne({
+        email,
+        isDeleted: false,
+      })
+      .select(
+        '+password +failedLoginAttempts +failedLoginWindowStartedAt +lockedUntil',
+      )
       .exec();
 
-    const DUMMY_HASH =
-      '$2b$12$CwTycUXWue0Thq9StjUM0uJ8xgOguJdyQh7fXxH4ILhYo8sHpItCu';
-    const passwordToCheck = user?.password ?? DUMMY_HASH;
-    const isPasswordValid = await bcrypt.compare(password, passwordToCheck);
+    /*
+     * Luôn chạy bcrypt, kể cả email không tồn tại, để giảm chênh lệch
+     * thời gian phản hồi có thể bị dùng để dò tài khoản.
+     */
+    const passwordHash = user?.password ?? DUMMY_PASSWORD_HASH;
+    const isPasswordValid = await bcrypt.compare(password, passwordHash);
 
-    if (!user || !isPasswordValid) {
-      throw new UnauthorizedException('Email hoặc mật khẩu không chính xác');
+    if (!user) {
+      throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
+    }
+
+    /*
+     * Bcrypt đã được chạy trước đó để giảm timing difference.
+     * Mọi lần thử trong thời gian khóa đều nhận cùng contract countdown.
+     */
+    if (this.isLoginLocked(user, now)) {
+      this.throwLoginLocked(user.lockedUntil);
+    }
+
+    if (!isPasswordValid) {
+      const lockedUntil = await this.recordFailedLoginAttempt(
+        user._id as Types.ObjectId,
+        now,
+      );
+
+      if (lockedUntil) {
+        this.throwLoginLocked(lockedUntil);
+      }
+
+      throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
     this.ensureAccountCanUseAuth(user);
 
-    const access_token = this.generateToken(user);
+    const accessToken = this.generateToken(user);
+    const refreshToken = this.generateRefreshToken(user);
+    const refreshTokenHash = await this.hashRefreshToken(refreshToken);
 
-    // Tạo Refresh Token sống dài (7 ngày)
-    const refresh_token = this.generateRefreshToken(user);
+    /*
+     * Chỉ cấp phiên nếu tài khoản vẫn chưa bị khóa/xóa trong thời gian
+     * bcrypt đang chạy. Đồng thời reset counter và lưu refresh-token hash.
+     */
+    const authenticatedUser = await this.userModel
+      .findOneAndUpdate(
+        {
+          _id: user._id,
+          isDeleted: false,
+          status: { $ne: 'banned' },
+          $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+        },
+        {
+          $set: {
+            refreshToken: refreshTokenHash,
+            failedLoginAttempts: 0,
+          },
+          $unset: {
+            lockedUntil: '',
+            failedLoginWindowStartedAt: '',
+          },
+        },
+        {
+          new: true,
+          runValidators: true,
+        },
+      )
+      .select('+password')
+      .exec();
 
-    // Chỉ lưu hash refresh token trong DB. Token raw chỉ trả về client.
-    user.refreshToken = await this.hashRefreshToken(refresh_token);
-    await user.save();
+    if (!authenticatedUser) {
+      const latestUser = await this.userModel
+        .findById(user._id)
+        .select('+lockedUntil')
+        .exec();
 
-    this.logger.log(`User logged in: ${user._id}`);
+      const latestCheckTime = new Date();
+
+      if (latestUser && this.isLoginLocked(latestUser, latestCheckTime)) {
+        this.throwLoginLocked(latestUser.lockedUntil);
+      }
+
+      throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
+    }
+
+    this.logger.log(`User logged in: ${authenticatedUser._id}`);
 
     return {
       message: 'Đăng nhập thành công',
-      access_token,
-      refresh_token,
-      user: this.toPublicUser(user),
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      user: this.toPublicUser(authenticatedUser),
     };
   }
 
@@ -287,10 +530,8 @@ export class AuthService {
       .select('+forgotPasswordOtp +forgotPasswordExpiry'); // Lấy thêm các trường ẩn
 
     if (!user) {
-      // Chuẩn doanh nghiệp: Trả ra lỗi cụ thể nếu email chưa đăng ký
-      throw new NotFoundException(
-        'Email này không trùng với email khi đăng ký tài khoản',
-      );
+      await this.performDummyOtpHash();
+      return GENERIC_FORGOT_PASSWORD_RESPONSE;
     }
 
     // --- LOGIC RATE LIMITING CHUẨN DOANH NGHIỆP ---
@@ -307,10 +548,8 @@ export class AuthService {
       );
 
       if (secondsPassed < this.OTP_COOLDOWN_SECONDS) {
-        const remainingWait = this.OTP_COOLDOWN_SECONDS - secondsPassed;
-        throw new BadRequestException(
-          `Vui lòng đợi ${remainingWait} giây nữa trước khi yêu cầu mã mới`,
-        );
+        await this.performDummyOtpHash();
+        return GENERIC_FORGOT_PASSWORD_RESPONSE;
       }
     }
 
@@ -329,14 +568,26 @@ export class AuthService {
     // Gửi email thật cho User thay vì log console
     try {
       await this.mailService.sendOtpEmail(email, otp);
-    } catch (error) {
-      this.logger.error('Send OTP mail failed', error);
-      throw new InternalServerErrorException(
-        'Không thể gửi email OTP. Vui lòng thử lại sau.',
-      );
-    } 
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
 
-    return { success: true, message: 'Mã OTP đã được gửi' };
+      const errorStack = error instanceof Error ? error.stack : undefined;
+
+      this.logger.error(
+        `[AUTH_OTP_DELIVERY_FAILED] ${errorMessage}`,
+        errorStack,
+      );
+
+      user.forgotPasswordOtp = undefined;
+      user.forgotPasswordExpiry = undefined;
+      user.forgotPasswordAttempts = 0;
+      await user.save();
+
+      return GENERIC_FORGOT_PASSWORD_RESPONSE;
+    }
+
+    return GENERIC_FORGOT_PASSWORD_RESPONSE;
   }
 
   // BƯỚC 2: Verify OTP
@@ -397,22 +648,32 @@ export class AuthService {
         status: 'active',
       })
       .select(
-        '+password +forgotPasswordOtp +forgotPasswordExpiry +forgotPasswordAttempts',
+        [
+          '+password',
+          '+forgotPasswordOtp',
+          '+forgotPasswordExpiry',
+          '+forgotPasswordAttempts',
+          '+failedLoginAttempts',
+          '+failedLoginWindowStartedAt',
+          '+lockedUntil',
+          '+refreshToken',
+        ].join(' '),
       );
 
-    if (!user) throw new BadRequestException('Người dùng không tồn tại');
-
-    // Kiểm tra thời hạn OTP (3 phút như ông đã set)
-    if (user.forgotPasswordExpiry && user.forgotPasswordExpiry < new Date()) {
-      throw new BadRequestException(
-        'Mã OTP đã hết hạn, vui lòng yêu cầu mã mới',
-      );
+    // Kiểm tra user & Kiểm tra thời hạn OTP (3 phút như ông đã set)
+    if (
+      !user ||
+      !user.forgotPasswordExpiry ||
+      user.forgotPasswordExpiry < new Date()
+    ) {
+      throw new BadRequestException('OTP không hợp lệ hoặc đã hết hạn');
     }
 
     if ((user.forgotPasswordAttempts ?? 0) >= MAX_OTP_VERIFY_ATTEMPTS) {
       user.forgotPasswordOtp = undefined;
       user.forgotPasswordExpiry = undefined;
       user.forgotPasswordAttempts = 0;
+
       await user.save();
 
       throw new BadRequestException(
@@ -436,6 +697,14 @@ export class AuthService {
     user.forgotPasswordOtp = undefined;
     user.forgotPasswordExpiry = undefined;
     user.forgotPasswordAttempts = 0;
+
+    // Reset trạng thái khóa vì user đã chứng minh quyền sở hữu qua OTP.
+    user.failedLoginAttempts = 0;
+    user.failedLoginWindowStartedAt = undefined;
+    user.lockedUntil = undefined;
+
+    // Thu hồi mọi phiên cũ sau khi thay đổi mật khẩu.
+    user.refreshToken = null;
 
     await user.save();
 

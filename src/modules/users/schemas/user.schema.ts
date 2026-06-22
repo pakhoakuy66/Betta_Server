@@ -79,6 +79,31 @@ export class User extends Document {
   @Prop({ type: Number, default: 0 })
   followingCount!: number;
 
+  // Số lần đăng nhập sai liên tiếp. Không trả field này qua API mặc định.
+  @Prop({
+    type: Number,
+    default: 0,
+    min: 0,
+    select: false,
+  })
+  failedLoginAttempts!: number;
+
+  // Mốc bắt đầu cửa sổ tính các lần đăng nhập sai liên tiếp.
+  @Prop({
+    type: Date,
+    default: null,
+    select: false,
+  })
+  failedLoginWindowStartedAt?: Date | null;
+
+  // Thời điểm tài khoản được phép đăng nhập trở lại.
+  @Prop({
+    type: Date,
+    default: null,
+    select: false,
+  })
+  lockedUntil?: Date | null;
+
   // Các trường cho Forgot Password
   @Prop({ type: String, select: false })
   forgotPasswordOtp?: string;
