@@ -3,6 +3,7 @@ import {
   Post,
   Body,
   Get,
+  Patch,
   UseGuards,
   Request,
   Req,
@@ -19,6 +20,7 @@ import {
   VerifyOtpDto,
   ResetPasswordDto,
   RefreshTokenDto,
+  ChangePasswordDto,
 } from '../dto/auth.dto';
 import { LoginDto } from '../dto/auth.dto';
 
@@ -98,6 +100,14 @@ export class AuthController {
     return this.authService.refreshToken(dto.refreshToken);
   }
 
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Đổi mật khẩu khi người dùng đã đăng nhập' })
+  @UseGuards(AuthGuard('jwt'))
+  @Patch('change-password')
+  async changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(req.user._id, dto);
+  }
+
   @ApiOperation({ summary: 'Đăng xuất hệ thống' })
   @ApiBearerAuth('access-token') // Để hiện nút nhập Token trên Swagger
   @UseGuards(AuthGuard('jwt'))
@@ -109,11 +119,11 @@ export class AuthController {
   }
 
   // API lấy thông tin cá nhân (Cần gửi Token lên Header)
-  @ApiBearerAuth() // Đánh dấu API này yêu cầu Token (Bearer)
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Lấy thông tin cá nhân hiện tại' })
   @UseGuards(AuthGuard('jwt'))
   @Get('me')
-  getProfile(@Request() req) {
-    return req.user; // Dữ liệu này từ hàm validate() trong JwtStrategy
+  getProfile(@Request() req: any) {
+    return this.authService.getCurrentUser(req.user._id);
   }
 }

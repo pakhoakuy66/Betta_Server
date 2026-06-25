@@ -23,6 +23,7 @@ import {
   ForgotPasswordDto,
   VerifyOtpDto,
   ResetPasswordDto,
+  ChangePasswordDto,
 } from '../dto/auth.dto';
 import {
   AuthResponse,
@@ -517,6 +518,24 @@ export class AuthService {
     };
   }
 
+  async getCurrentUser(userId: string) {
+    const user = await this.userModel
+      .findOne({
+        _id: userId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .exec();
+
+    if (!user) {
+      throw new UnauthorizedException(
+        'Tài khoản không tồn tại hoặc đã bị khóa',
+      );
+    }
+
+    return this.toPublicUser(user);
+  }
+
   // BƯỚC 1: Gửi OTP
   async forgotPassword(body: ForgotPasswordDto) {
     const email = body.email.trim().toLowerCase();
@@ -690,7 +709,19 @@ export class AuthService {
       throw new BadRequestException('OTP không hợp lệ');
     }
 
-    // Hash mật khẩu mới (BCRYPT_ROUNDS = 12 như cũ của ông)
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+
+    if (isSamePassword) {
+      /*
+       * OTP đã đúng nhưng mật khẩu mới không hợp lệ về mặt nghiệp vụ.
+       * Không xóa OTP ở nhánh này để user có thể nhập mật khẩu khác
+       * trong thời gian OTP còn hiệu lực.
+       */
+      throw new BadRequestException(
+        'Mật khẩu mới không được trùng với mật khẩu hiện tại',
+      );
+    }
+
     user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
     // Xóa dấu vết OTP sau khi đổi thành công
@@ -709,6 +740,64 @@ export class AuthService {
     await user.save();
 
     return { success: true, message: 'Đổi mật khẩu thành công!' };
+  }
+
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const { currentPassword, newPassword, confirmPassword } = dto;
+
+    if (newPassword !== confirmPassword) {
+      throw new BadRequestException('Mật khẩu xác nhận không khớp');
+    }
+
+    const user = await this.userModel
+      .findOne({
+        _id: userId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('+password +refreshToken')
+      .exec();
+
+    if (!user) {
+      throw new UnauthorizedException(
+        'Tài khoản không tồn tại hoặc đã bị khóa',
+      );
+    }
+
+    const isCurrentPasswordValid = await bcrypt.compare(
+      currentPassword,
+      user.password,
+    );
+
+    if (!isCurrentPasswordValid) {
+      throw new UnauthorizedException('Mật khẩu hiện tại không chính xác');
+    }
+
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+
+    if (isSamePassword) {
+      throw new BadRequestException(
+        'Mật khẩu mới không được trùng với mật khẩu hiện tại',
+      );
+    }
+
+    user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+    /*
+     * Thu hồi refresh token sau khi đổi mật khẩu.
+     * Access token hiện tại vẫn có thể sống đến khi hết hạn ngắn 15 phút,
+     * FE cần xóa token local và yêu cầu đăng nhập lại sau response thành công.
+     */
+    user.refreshToken = null;
+
+    await user.save();
+
+    this.logger.log(`User changed password: ${user._id}`);
+
+    return {
+      success: true,
+      message: 'Đổi mật khẩu thành công, vui lòng đăng nhập lại',
+    };
   }
 
   async logout(userId: string) {

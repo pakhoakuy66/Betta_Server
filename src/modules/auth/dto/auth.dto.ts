@@ -8,6 +8,12 @@ import {
   Matches,
   Length,
 } from 'class-validator';
+import {
+  PASSWORD_COMPLEXITY_PATTERN,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_POLICY_MESSAGE,
+} from '../constants/password-policy';
 
 export class RegisterDto {
   @ApiProperty({
@@ -36,15 +42,20 @@ export class RegisterDto {
   email!: string;
 
   @ApiProperty({
-    example: 'Password123@',
-    description: 'Mật khẩu (bao gồm hoa, thường, số, ký tự đặc biệt)',
+    example: 'Password123.',
+    description:
+      'Mật khẩu tối thiểu 8 ký tự, bao gồm chữ, số và ít nhất một ký tự đặc biệt',
   })
   @IsNotEmpty({ message: 'Mật khẩu không được bỏ trống' })
   @IsString()
-  @MinLength(6, { message: 'Mật khẩu phải có ít nhất 6 ký tự' })
-  @Matches(/((?=.*\d)|(?=.*\W+))(?![.\n])(?=.*[A-Z])(?=.*[a-z]).*$/, {
-    message:
-      'Mật khẩu quá yếu (phải bao gồm chữ hoa, chữ thường, số và ký tự đặc biệt)',
+  @MinLength(PASSWORD_MIN_LENGTH, {
+    message: PASSWORD_POLICY_MESSAGE,
+  })
+  @MaxLength(PASSWORD_MAX_LENGTH, {
+    message: `Mật khẩu không được vượt quá ${PASSWORD_MAX_LENGTH} ký tự`,
+  })
+  @Matches(PASSWORD_COMPLEXITY_PATTERN, {
+    message: PASSWORD_POLICY_MESSAGE,
   })
   password!: string;
 }
@@ -91,15 +102,17 @@ export class ResetPasswordDto {
   @IsString()
   otp!: string;
 
-  @ApiProperty({ example: 'NewPassword123@' })
-  @IsNotEmpty()
+  @ApiProperty({ example: 'NewPassword123.' })
+  @IsNotEmpty({ message: 'Mật khẩu mới không được bỏ trống' })
   @IsString()
-  @MinLength(6, {
-    message: 'Mật khẩu phải tối thiểu 6 ký tự.',
+  @MinLength(PASSWORD_MIN_LENGTH, {
+    message: PASSWORD_POLICY_MESSAGE,
   })
-  @Matches(/((?=.*\d)|(?=.*\W+))(?![.\n])(?=.*[A-Z])(?=.*[a-z]).*$/, {
-    message:
-      'Mật khẩu quá yếu (phải bao gồm chữ hoa, chữ thường, số và ký tự đặc biệt)',
+  @MaxLength(PASSWORD_MAX_LENGTH, {
+    message: `Mật khẩu không được vượt quá ${PASSWORD_MAX_LENGTH} ký tự`,
+  })
+  @Matches(PASSWORD_COMPLEXITY_PATTERN, {
+    message: PASSWORD_POLICY_MESSAGE,
   })
   newPassword!: string;
 }
@@ -109,4 +122,30 @@ export class RefreshTokenDto {
   @IsNotEmpty({ message: 'Vui lòng cung cấp Refresh Token' })
   @IsString()
   refreshToken!: string;
+}
+
+export class ChangePasswordDto {
+  @ApiProperty({ example: 'CurrentPassword123.' })
+  @IsNotEmpty({ message: 'Vui lòng nhập mật khẩu hiện tại' })
+  @IsString()
+  currentPassword!: string;
+
+  @ApiProperty({ example: 'NewPassword123.' })
+  @IsNotEmpty({ message: 'Vui lòng nhập mật khẩu mới' })
+  @IsString()
+  @MinLength(PASSWORD_MIN_LENGTH, {
+    message: PASSWORD_POLICY_MESSAGE,
+  })
+  @MaxLength(PASSWORD_MAX_LENGTH, {
+    message: `Mật khẩu không được vượt quá ${PASSWORD_MAX_LENGTH} ký tự`,
+  })
+  @Matches(PASSWORD_COMPLEXITY_PATTERN, {
+    message: PASSWORD_POLICY_MESSAGE,
+  })
+  newPassword!: string;
+
+  @ApiProperty({ example: 'NewPassword123.' })
+  @IsNotEmpty({ message: 'Vui lòng xác nhận mật khẩu mới' })
+  @IsString()
+  confirmPassword!: string;
 }
