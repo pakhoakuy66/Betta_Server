@@ -4,20 +4,54 @@ import {
   Body,
   Patch,
   Param,
+  Query,
   UseGuards,
   Request,
+  UploadedFile,
+  UseInterceptors,
   Delete,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiConsumes,
+} from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { UsersService } from '../services/users.service';
-import { UpdateProfileDto } from '../dto/users.dto';
+import { SearchUsersQueryDto, UpdateProfileDto } from '../dto/users.dto';
 import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
+
+type AuthenticatedRequest = {
+  user: {
+    _id: string;
+  };
+};
+
+type UploadFile = {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname?: string;
+};
 
 @ApiTags('Users')
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Tìm kiếm người dùng theo username' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get('search')
+  async searchUsers(
+    @Request() req: AuthenticatedRequest,
+    @Query() query: SearchUsersQueryDto,
+  ) {
+    return this.usersService.searchUsers(req.user._id, query);
+  }
 
   @ApiOperation({ summary: 'Lấy thông tin cá nhân của người dùng bất kỳ' })
   @UseGuards(OptionalJwtAuthGuard)
@@ -39,6 +73,35 @@ export class UsersController {
     // req.user._id được lấy ra nhờ tấm khiên AuthGuard kiểm tra Token
     const userId = req.user._id;
     return this.usersService.updateProfile(userId, updateProfileDto);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Cập nhật avatar của chính mình' })
+  @ApiConsumes('multipart/form-data')
+  @UseGuards(AuthGuard('jwt'))
+  @UseInterceptors(
+    FileInterceptor('avatar', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 5 * 1024 * 1024,
+        files: 1,
+      },
+    }),
+  )
+  @Patch('me/avatar')
+  async updateMyAvatar(
+    @Request() req: AuthenticatedRequest,
+    @UploadedFile() file?: UploadFile,
+  ) {
+    return this.usersService.updateAvatar(req.user._id, file);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Xóa avatar của chính mình' })
+  @UseGuards(AuthGuard('jwt'))
+  @Delete('me/avatar')
+  async removeMyAvatar(@Request() req: AuthenticatedRequest) {
+    return this.usersService.removeAvatar(req.user._id);
   }
 
   @ApiBearerAuth('access-token')

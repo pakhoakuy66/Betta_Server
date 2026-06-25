@@ -1,6 +1,11 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
+export const DEFAULT_AVATAR_ID = 'user_1_bibjpn';
+
+export const DEFAULT_AVATAR_URL =
+  'https://res.cloudinary.com/dulmj9v6i/image/upload/v1774254440/user_1_bibjpn.jpg';
+
 @Schema({ timestamps: true }) // Tự động thêm createdAt, updatedAt
 export class User extends Document {
   @Prop({
@@ -34,12 +39,11 @@ export class User extends Document {
   @Prop({ type: String, required: true })
   password!: string;
 
-  @Prop({ default: 'user_1_bibjpn' })
+  @Prop({ default: DEFAULT_AVATAR_ID })
   avatarId!: string;
 
   @Prop({
-    default:
-      'https://res.cloudinary.com/dulmj9v6i/image/upload/v1774254440/user_1_bibjpn.jpg',
+    default: DEFAULT_AVATAR_URL,
   })
   avatar!: string;
 

@@ -83,6 +83,21 @@ export class UploadsService {
     return Promise.all(files.map((file) => this.uploadPostImage(file)));
   }
 
+  async uploadAvatar(file: UploadFile): Promise<UploadedImage> {
+    this.validateImageFile(file);
+
+    const result = await this.uploadBuffer(file.buffer, 'betta/avatars');
+
+    return {
+      url: result.secure_url,
+      publicId: result.public_id,
+      width: result.width,
+      height: result.height,
+      format: result.format,
+      bytes: result.bytes,
+    };
+  }
+
   async deleteImage(publicId: string): Promise<void> {
     if (!publicId) return;
 
