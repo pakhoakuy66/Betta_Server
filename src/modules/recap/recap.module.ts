@@ -4,6 +4,6 @@ import { RecapController } from './controllers/recap.controller';
 
 @Module({
   providers: [RecapService],
-  controllers: [RecapController]
+  controllers: [RecapController],
 })
 export class RecapModule {}

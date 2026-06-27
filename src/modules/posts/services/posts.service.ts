@@ -20,7 +20,8 @@ import {
 } from '../utils/generate-post-public-id';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
-import { FeedQueryDto } from '../dto/post-query.dto';
+import { Reaction } from '../../reactions/schemas/reaction.schema';
+import { FeedQueryDto, ProfilePostsQueryDto } from '../dto/post-query.dto';
 
 type UploadFile = {
   buffer: Buffer;
@@ -43,6 +44,18 @@ type PostAuthor = {
   streakCount: number;
 };
 
+type PostListItem = {
+  _id: Types.ObjectId;
+  publicId: string;
+  authorId: Types.ObjectId;
+  content: string;
+  images: { url: string; publicId: string }[];
+  likeCount: number;
+  shareCount: number;
+  expireAt: Date;
+  createdAt: Date;
+};
+
 @Injectable()
 export class PostsService {
   private readonly logger = new Logger(PostsService.name);
@@ -55,6 +68,8 @@ export class PostsService {
     private readonly relationshipModel: Model<Relationship>,
     @InjectModel(Block.name)
     private readonly blockModel: Model<Block>,
+    @InjectModel(Reaction.name)
+    private readonly reactionModel: Model<Reaction>,
   ) {}
 
   async createPost(
@@ -282,14 +297,154 @@ export class PostsService {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit + 1)
+      .lean<PostListItem[]>()
       .exec();
 
     const hasMore = posts.length > limit;
     const pagePosts = hasMore ? posts.slice(0, limit) : posts;
 
+    const reactedPostIds = await this.getReactedPostIdSet(
+      userObjectId,
+      pagePosts.map((post) => post._id),
+    );
+
     return {
       success: true,
-      data: pagePosts.map((post) => this.toFeedPostResponse(post, authorMap)),
+      data: pagePosts.map((post) =>
+        this.toFeedPostResponse(post, authorMap, reactedPostIds),
+      ),
+      pagination: {
+        page,
+        limit,
+        hasMore,
+      },
+    };
+  }
+
+  async getProfilePosts(
+    currentUserId: string,
+    username: string,
+    query: ProfilePostsQueryDto,
+  ) {
+    if (!Types.ObjectId.isValid(currentUserId)) {
+      throw new BadRequestException('User ID không hợp lệ');
+    }
+
+    const normalizedUsername = username.trim();
+
+    if (!normalizedUsername) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    const currentObjectId = new Types.ObjectId(currentUserId);
+    const page = query.page;
+    const limit = query.limit;
+    const skip = (page - 1) * limit;
+    const now = new Date();
+
+    const [currentUser, profileUser] = await Promise.all([
+      this.userModel
+        .findOne({
+          _id: currentObjectId,
+          isDeleted: false,
+          status: 'active',
+        })
+        .select('_id')
+        .lean()
+        .exec(),
+
+      this.userModel
+        .findOne({
+          username: normalizedUsername,
+          isDeleted: false,
+          status: 'active',
+        })
+        .select('_id publicId username fullname avatar streakCount')
+        .lean()
+        .exec(),
+    ]);
+
+    if (!currentUser) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    if (!profileUser) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    const isOwner = profileUser._id.toString() === currentUserId;
+
+    const blockRecord = await this.blockModel
+      .findOne({
+        $or: [
+          { blockerId: currentObjectId, blockedId: profileUser._id },
+          { blockerId: profileUser._id, blockedId: currentObjectId },
+        ],
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (blockRecord) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    if (!isOwner) {
+      const relationship = await this.relationshipModel
+        .findOne({
+          followerId: currentObjectId,
+          followingId: profileUser._id,
+        })
+        .select('_id')
+        .lean()
+        .exec();
+
+      if (!relationship) {
+        throw new ForbiddenException(
+          'Bạn cần theo dõi người dùng này để xem bài viết',
+        );
+      }
+    }
+
+    const posts = await this.postModel
+      .find({
+        authorId: profileUser._id,
+        expireAt: { $gt: now },
+        isDeletedByAdmin: false,
+      })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit + 1)
+      .lean<PostListItem[]>()
+      .exec();
+
+    const hasMore = posts.length > limit;
+    const pagePosts = hasMore ? posts.slice(0, limit) : posts;
+
+    const reactedPostIds = await this.getReactedPostIdSet(
+      currentObjectId,
+      pagePosts.map((post) => post._id),
+    );
+
+    const authorMap = new Map<string, PostAuthor>([
+      [
+        profileUser._id.toString(),
+        {
+          _id: profileUser._id,
+          publicId: profileUser.publicId,
+          username: profileUser.username,
+          fullname: profileUser.fullname,
+          avatar: profileUser.avatar ?? null,
+          streakCount: profileUser.streakCount ?? 0,
+        },
+      ],
+    ]);
+
+    return {
+      success: true,
+      data: pagePosts.map((post) =>
+        this.toFeedPostResponse(post, authorMap, reactedPostIds),
+      ),
       pagination: {
         page,
         limit,
@@ -383,16 +538,13 @@ export class PostsService {
       }
     }
 
+    const reactedPostIds = await this.getReactedPostIdSet(currentObjectId, [
+      post._id,
+    ]);
+
     return {
       success: true,
-      data: this.toPostDetailResponse(post, {
-        _id: author._id,
-        publicId: author.publicId,
-        username: author.username,
-        fullname: author.fullname,
-        avatar: author.avatar ?? null,
-        streakCount: author.streakCount ?? 0,
-      }),
+      data: this.toPostDetailResponse(post, author, reactedPostIds),
     };
   }
 
@@ -446,38 +598,42 @@ export class PostsService {
   }
 
   private async decrementPostCount(userId: Types.ObjectId): Promise<void> {
-  try {
-    const result = await this.userModel
-      .updateOne(
-        {
-          _id: userId,
-          postsCount: { $gt: 0 },
-        },
-        {
-          $inc: { postsCount: -1 },
-        },
-      )
-      .exec();
+    try {
+      const result = await this.userModel
+        .updateOne(
+          {
+            _id: userId,
+            postsCount: { $gt: 0 },
+          },
+          {
+            $inc: { postsCount: -1 },
+          },
+        )
+        .exec();
 
-    if (result.matchedCount === 0) {
+      if (result.matchedCount === 0) {
+        this.logger.warn(
+          `postsCount was not decremented for user ${userId.toString()}: user not found or postsCount already equals 0`,
+        );
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      /*
+       * Post đã được xóa thành công. Không trả 500 vì postsCount là dữ liệu
+       * denormalized và có thể được đồng bộ lại bằng maintenance job.
+       */
       this.logger.warn(
-        `postsCount was not decremented for user ${userId.toString()}: user not found or postsCount already equals 0`,
+        `Failed to decrement postsCount for user ${userId.toString()}: ${message}`,
       );
     }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-
-    /*
-     * Post đã được xóa thành công. Không trả 500 vì postsCount là dữ liệu
-     * denormalized và có thể được đồng bộ lại bằng maintenance job.
-     */
-    this.logger.warn(
-      `Failed to decrement postsCount for user ${userId.toString()}: ${message}`,
-    );
   }
-}
 
-  private toFeedPostResponse(post: Post, authorMap: Map<string, PostAuthor>) {
+  private toFeedPostResponse(
+    post: PostListItem,
+    authorMap: Map<string, PostAuthor>,
+    reactedPostIds: Set<string>,
+  ) {
     const author = authorMap.get(post.authorId.toString());
 
     return {
@@ -490,8 +646,9 @@ export class PostsService {
       })),
       likeCount: post.likeCount,
       shareCount: post.shareCount,
+      isReacted: reactedPostIds.has(post._id.toString()),
       expireAt: post.expireAt,
-      createdAt: post.get('createdAt') as Date,
+      createdAt: post.createdAt,
       author: author
         ? {
             id: author._id.toString(),
@@ -505,7 +662,11 @@ export class PostsService {
     };
   }
 
-  private toPostDetailResponse(post: Post, author: PostAuthor) {
+  private toPostDetailResponse(
+    post: Post,
+    author: PostAuthor,
+    reactedPostIds: Set<string>,
+  ) {
     return {
       id: post.publicId,
       publicId: post.publicId,
@@ -516,6 +677,7 @@ export class PostsService {
       })),
       likeCount: post.likeCount,
       shareCount: post.shareCount,
+      isReacted: reactedPostIds.has(post._id.toString()),
       expireAt: post.expireAt,
       createdAt: post.get('createdAt') as Date,
       updatedAt: post.get('updatedAt') as Date,
@@ -528,5 +690,23 @@ export class PostsService {
         streakCount: author.streakCount,
       },
     };
+  }
+
+  private async getReactedPostIdSet(
+    currentUserId: Types.ObjectId,
+    postIds: Types.ObjectId[],
+  ): Promise<Set<string>> {
+    if (postIds.length === 0) return new Set();
+
+    const reactions = await this.reactionModel
+      .find({
+        userId: currentUserId,
+        postId: { $in: postIds },
+      })
+      .select('postId')
+      .lean<{ postId: Types.ObjectId }[]>()
+      .exec();
+
+    return new Set(reactions.map((reaction) => reaction.postId.toString()));
   }
 }

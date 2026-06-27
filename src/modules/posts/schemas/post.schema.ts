@@ -1,6 +1,12 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
+export enum PostCleanupStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  FAILED = 'failed',
+}
+
 @Schema({
   timestamps: true, // Tự động tạo createdAt và updatedAt
   toJSON: { virtuals: true },
@@ -56,13 +62,30 @@ export class Post extends Document {
 
   // 5. CƠ CHẾ TỰ XÓA SAU 24 GIỜ
   // expireAt là thời điểm bài viết hết hạn.
-  // MongoDB TTL index sẽ tự xóa document khi expireAt <= thời gian hiện tại.
+  // expireAt dùng để ẩn post khỏi query và cho cron job cleanup tài nguyên.
   @Prop({
     type: Date,
     default: () => new Date(Date.now() + 24 * 60 * 60 * 1000),
-    index: { expires: 0 },
+    index: true,
   })
   expireAt!: Date;
+
+  @Prop({
+    type: String,
+    enum: Object.values(PostCleanupStatus),
+    default: PostCleanupStatus.PENDING,
+    index: true,
+  })
+  cleanupStatus!: PostCleanupStatus;
+
+  @Prop({ type: Date, default: null, index: true })
+  cleanupLockedUntil?: Date | null;
+
+  @Prop({ type: Number, default: 0 })
+  cleanupAttempts!: number;
+
+  @Prop({ type: String, default: null })
+  cleanupLastError?: string | null;
 
   // Thêm vào trong Post class
   @Prop({ type: Boolean, default: false })
@@ -101,4 +124,10 @@ PostSchema.index({
   expireAt: 1,
   isDeletedByAdmin: 1,
   createdAt: -1,
+});
+
+PostSchema.index({
+  cleanupStatus: 1,
+  cleanupLockedUntil: 1,
+  expireAt: 1,
 });

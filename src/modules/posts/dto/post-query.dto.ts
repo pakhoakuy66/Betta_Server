@@ -1,7 +1,7 @@
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
 
-export class FeedQueryDto {
+export class PostListQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -15,3 +15,7 @@ export class FeedQueryDto {
   @Max(30)
   limit = 10;
 }
+
+export class FeedQueryDto extends PostListQueryDto {}
+
+export class ProfilePostsQueryDto extends PostListQueryDto {}
