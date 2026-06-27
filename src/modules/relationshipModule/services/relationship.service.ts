@@ -5,9 +5,24 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { NotificationsService } from '../../notifications/services/notifications.service';
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
 import { Block } from '../schemas/block.schema';
+
+type RelationshipListUser = {
+  _id: Types.ObjectId;
+  publicId?: string;
+  username: string;
+  fullname: string;
+  avatar?: string;
+  bio?: string;
+  streakCount?: number;
+};
+
+type CountResult = {
+  total: number;
+};
 
 @Injectable()
 export class RelationshipService {
@@ -16,9 +31,12 @@ export class RelationshipService {
     private relationshipModel: Model<Relationship>,
     @InjectModel(User.name) private userModel: Model<User>,
     @InjectModel(Block.name) private blockModel: Model<Block>,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
-  private async getBlockedUserIds(currentUserId?: string) {
+  private async getBlockedUserIds(
+    currentUserId?: string,
+  ): Promise<Types.ObjectId[]> {
     if (!currentUserId) return [];
 
     const currentId = new Types.ObjectId(currentUserId);
@@ -94,6 +112,11 @@ export class RelationshipService {
       }), // Tăng số fan cho Idol
     ]);
 
+    void this.notificationsService.createFollowNotification({
+      followerId,
+      targetUserId: targetId,
+    });
+
     return { success: true, message: 'Đã theo dõi thành công' };
   }
 
@@ -153,7 +176,7 @@ export class RelationshipService {
     ];
 
     const [followers, totalResult] = await Promise.all([
-      this.relationshipModel.aggregate([
+      this.relationshipModel.aggregate<RelationshipListUser>([
         ...activeFollowerStages,
         { $sort: { createdAt: -1 } },
         { $skip: skip },
@@ -170,7 +193,7 @@ export class RelationshipService {
           },
         },
       ]),
-      this.relationshipModel.aggregate([
+      this.relationshipModel.aggregate<CountResult>([
         ...activeFollowerStages,
         { $count: 'total' },
       ]),
@@ -250,7 +273,7 @@ export class RelationshipService {
     ];
 
     const [following, totalResult] = await Promise.all([
-      this.relationshipModel.aggregate([
+      this.relationshipModel.aggregate<RelationshipListUser>([
         ...activeFollowingStages,
         { $sort: { createdAt: -1 } },
         { $skip: skip },
@@ -267,7 +290,7 @@ export class RelationshipService {
           },
         },
       ]),
-      this.relationshipModel.aggregate([
+      this.relationshipModel.aggregate<CountResult>([
         ...activeFollowingStages,
         { $count: 'total' },
       ]),

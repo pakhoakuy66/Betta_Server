@@ -1,6 +1,16 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
+export const NOTIFICATION_TTL_DAYS = 14;
+export const NOTIFICATION_TTL_MS = NOTIFICATION_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+export enum NotificationType {
+  REACTION = 'REACTION',
+  RECAP = 'RECAP',
+  EXPIRING = 'EXPIRING',
+  FOLLOW = 'FOLLOW',
+}
+
 @Schema({
   timestamps: true,
   toJSON: { virtuals: true },
@@ -12,14 +22,24 @@ export class Notification extends Document {
 
   @Prop({
     required: true,
-    enum: ['REACTION', 'RECAP', 'EXPIRING', 'FOLLOW'],
+    enum: Object.values(NotificationType),
     index: true,
   })
-  type!: string;
+  type!: NotificationType;
 
-  // Danh sách ID người tương tác để hiển thị avatar nhóm (max 3-5 người)
-  @Prop({ type: [{ type: Types.ObjectId, ref: 'User' }] })
+  // Top actors gần nhất để render avatar/name trên UI.
+  @Prop({ type: [{ type: Types.ObjectId, ref: 'User' }], default: [] })
   actorIds!: Types.ObjectId[];
+
+  /*
+   * Actor đã từng được tính vào notification group.
+   * Đây là dữ liệu phục vụ actorCount, không phải danh sách user hiện còn đang like.
+   */
+  @Prop({ type: [{ type: Types.ObjectId, ref: 'User' }], default: [] })
+  countedActorIds!: Types.ObjectId[];
+
+  @Prop({ type: Number, default: 0 })
+  actorCount!: number;
 
   @Prop({ type: Number, default: 0 })
   otherCount!: number;
@@ -30,22 +50,31 @@ export class Notification extends Document {
   @Prop({ type: Types.ObjectId })
   targetId?: Types.ObjectId;
 
+  @Prop({ type: String })
+  targetPublicId?: string;
+
+  @Prop({ type: String })
+  dedupeKey?: string;
+
   @Prop({ type: Boolean, default: false, index: true })
   isRead!: boolean;
 
-  /**
-   * CƠ CHẾ TỰ HỦY (TTL INDEX)
-   * 14 ngày = 14 * 24 * 60 * 60 = 1,209,600 giây
-   */
   @Prop({
     type: Date,
-    default: Date.now,
-    index: { expires: 1209600 },
+    default: () => new Date(Date.now() + NOTIFICATION_TTL_MS),
+    index: { expires: 0 },
   })
-  expireAt!: Date;
+  expiresAt!: Date;
 }
 
 export const NotificationSchema = SchemaFactory.createForClass(Notification);
 
-// Index tối ưu truy vấn danh sách thông báo mới nhất
 NotificationSchema.index({ recipientId: 1, createdAt: -1 });
+
+NotificationSchema.index(
+  { dedupeKey: 1 },
+  {
+    unique: true,
+    sparse: true,
+  },
+);

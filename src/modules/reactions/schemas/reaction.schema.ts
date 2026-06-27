@@ -1,6 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Types, Document } from 'mongoose';
 
+export enum ReactionType {
+  HEART = 'heart',
+}
+
 @Schema({ timestamps: true })
 export class Reaction extends Document {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
@@ -12,8 +16,13 @@ export class Reaction extends Document {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   postOwnerId!: Types.ObjectId; // Chủ bài viết (Cực kỳ quan trọng để làm Recap nhanh)
 
-  @Prop({ type: String, default: 'heart' })
-  emojiType!: string; // Mở rộng nếu sau này có nhiều loại emoji
+  @Prop({
+    type: String,
+    enum: Object.values(ReactionType),
+    default: ReactionType.HEART,
+    required: true,
+  })
+  emojiType!: ReactionType;
 }
 
 export const ReactionSchema = SchemaFactory.createForClass(Reaction);
@@ -22,3 +31,4 @@ export const ReactionSchema = SchemaFactory.createForClass(Reaction);
 ReactionSchema.index({ userId: 1, postId: 1 }, { unique: true });
 // Index để thống kê Recap cho chủ bài viết
 ReactionSchema.index({ postOwnerId: 1, createdAt: -1 });
+ReactionSchema.index({ postId: 1, createdAt: -1 });
