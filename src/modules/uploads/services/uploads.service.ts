@@ -8,11 +8,19 @@ import { ConfigService } from '@nestjs/config';
 import { v2 as cloudinary, UploadApiResponse } from 'cloudinary';
 import { Readable } from 'stream';
 
+type CloudinaryDestroyResult = {
+  result?: string;
+};
+
 type UploadFile = {
   buffer: Buffer;
   mimetype: string;
   size: number;
   originalname?: string;
+};
+
+type DeleteImageOptions = {
+  throwOnError?: boolean;
 };
 
 export type UploadedImage = {
@@ -98,35 +106,64 @@ export class UploadsService {
     };
   }
 
-  async deleteImage(publicId: string): Promise<void> {
+  async deleteImage(
+    publicId: string,
+    options: DeleteImageOptions = {},
+  ): Promise<void> {
     if (!publicId) return;
 
     try {
-      const result = await cloudinary.uploader.destroy(publicId, {
+      const result = (await cloudinary.uploader.destroy(publicId, {
         resource_type: 'image',
         invalidate: true,
-      });
+      })) as CloudinaryDestroyResult;
 
       if (result.result !== 'ok' && result.result !== 'not found') {
-        this.logger.warn(
-          `Unexpected Cloudinary delete result for ${publicId}: ${result.result}`,
-        );
-      }
-    } catch (err: unknown) {
-      // Không throw để tránh làm hỏng flow xóa post nếu Cloudinary lỗi tạm thời.
-      // Sau này có thể thay bằng logger hoặc retry queue.
-      const message = err instanceof Error ? err.message : String(err);
-      const stack = err instanceof Error ? err.stack : undefined;
+        const message = `Unexpected Cloudinary delete result for ${publicId}: ${result.result}`;
 
-      this.logger.warn(
+        this.logger.warn(message);
+
+        if (options.throwOnError) {
+          throw new Error(message);
+        }
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      this.logger.error(
         `Failed to delete image ${publicId} from Cloudinary: ${message}`,
-        stack,
+        error instanceof Error ? error.stack : undefined,
       );
+
+      if (options.throwOnError) {
+        throw error;
+      }
     }
   }
 
-  async deleteImages(publicIds: string[]): Promise<void> {
-    await Promise.all(publicIds.map((publicId) => this.deleteImage(publicId)));
+  async deleteImages(
+    publicIds: string[],
+    options: DeleteImageOptions = {},
+  ): Promise<void> {
+    const uniquePublicIds = [...new Set(publicIds.filter(Boolean))];
+
+    if (uniquePublicIds.length === 0) return;
+
+    const results = await Promise.allSettled(
+      uniquePublicIds.map((publicId) => this.deleteImage(publicId, options)),
+    );
+
+    if (!options.throwOnError) return;
+
+    const failedCount = results.filter(
+      (result) => result.status === 'rejected',
+    ).length;
+
+    if (failedCount > 0) {
+      throw new Error(
+        `Failed to delete ${failedCount}/${uniquePublicIds.length} Cloudinary images`,
+      );
+    }
   }
 
   private validateImageFile(file: UploadFile): void {

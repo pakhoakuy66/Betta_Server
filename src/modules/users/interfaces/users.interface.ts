@@ -4,6 +4,7 @@ export interface UserProfileResponse {
   username: string;
   fullname: string;
   avatar: string;
+  hasCustomAvatar: boolean;
   bio?: string;
   link?: string;
   followersCount?: number;

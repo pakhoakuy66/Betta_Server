@@ -25,6 +25,10 @@ type UploadFile = {
   originalname?: string;
 };
 
+type CountResult = {
+  total: number;
+};
+
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
@@ -162,7 +166,8 @@ export class UsersService {
     ]);
 
     // Nếu không bị chặn, trả về Full Profile (Map _id thành id)
-    const { _id, ...rest } = user;
+    const { _id, avatarId, ...rest } = user;
+
     return {
       success: true,
       data: {
@@ -170,9 +175,10 @@ export class UsersService {
         isFollowing,
         isBlocked: false,
         ...rest,
+        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
         followersCount: realFollowersCount,
         followingCount: realFollowingCount,
-      } as UserProfileResponse,
+      },
     };
   }
 
@@ -248,6 +254,7 @@ export class UsersService {
       data: {
         id: _id.toString(),
         ...rest,
+        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
       },
     };
   }
@@ -329,6 +336,7 @@ export class UsersService {
       data: {
         id: _id.toString(),
         ...rest,
+        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
       },
     };
   }
@@ -342,13 +350,31 @@ export class UsersService {
         isDeleted: false,
         status: 'active',
       })
-      .select('_id avatarId')
+      .select(
+        '-password -refreshToken -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
+      )
       .lean()
       .exec();
 
     if (!currentUser) {
       throw new NotFoundException('Không tìm thấy tài khoản hợp lệ');
     }
+
+    if (currentUser.avatarId === DEFAULT_AVATAR_ID) {
+      const { _id, avatarId, ...rest } = currentUser;
+
+      return {
+        success: true,
+        message: 'Avatar đang là ảnh mặc định',
+        data: {
+          id: _id.toString(),
+          ...rest,
+          hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
+        },
+      };
+    }
+
+    const oldAvatarId = currentUser.avatarId;
 
     const updatedUser = await this.userModel
       .findOneAndUpdate(
@@ -375,12 +401,12 @@ export class UsersService {
       throw new BadRequestException('Không thể xóa avatar');
     }
 
-    if (currentUser.avatarId && currentUser.avatarId !== DEFAULT_AVATAR_ID) {
+    if (oldAvatarId) {
       try {
-        await this.uploadsService.deleteImage(currentUser.avatarId);
+        await this.uploadsService.deleteImage(oldAvatarId);
       } catch (cleanupError: unknown) {
         this.logger.warn(
-          `[AVATAR_CLEANUP_FAILED] Failed to delete avatar ${currentUser.avatarId}: ${
+          `[AVATAR_CLEANUP_FAILED] Failed to delete avatar ${oldAvatarId}: ${
             cleanupError instanceof Error
               ? cleanupError.message
               : String(cleanupError)
@@ -397,6 +423,7 @@ export class UsersService {
       data: {
         id: _id.toString(),
         ...rest,
+        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
       },
     };
   }
@@ -462,8 +489,8 @@ export class UsersService {
     };
   }
 
-  private async countActiveFollowers(userId: Types.ObjectId) {
-    const result = await this.relationshipModel.aggregate([
+  private async countActiveFollowers(userId: Types.ObjectId): Promise<number> {
+    const result = await this.relationshipModel.aggregate<CountResult>([
       { $match: { followingId: userId } },
       {
         $lookup: {
@@ -481,8 +508,8 @@ export class UsersService {
     return result[0]?.total ?? 0;
   }
 
-  private async countActiveFollowing(userId: Types.ObjectId) {
-    const result = await this.relationshipModel.aggregate([
+  private async countActiveFollowing(userId: Types.ObjectId): Promise<number> {
+    const result = await this.relationshipModel.aggregate<CountResult>([
       { $match: { followerId: userId } },
       {
         $lookup: {

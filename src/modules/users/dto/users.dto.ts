@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   IsOptional,
   IsString,
@@ -13,12 +13,15 @@ import {
   Min,
 } from 'class-validator';
 
+const trimString = (value: unknown): unknown =>
+  typeof value === 'string' ? value.trim() : value;
+
 export class UpdateProfileDto {
   @ApiPropertyOptional({
     example: 'bibi.real_01',
     description: 'Username 1-30 ký tự, chỉ gồm chữ, số, dấu chấm và gạch dưới',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: TransformFnParams) => trimString(value))
   @IsOptional()
   @IsString()
   @MinLength(1, { message: 'Username không được để trống' })
@@ -32,7 +35,7 @@ export class UpdateProfileDto {
     example: 'Lập trình viên dạo...',
     description: 'Tiểu sử tối đa 150 ký tự',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: TransformFnParams) => trimString(value))
   @IsOptional()
   @IsString()
   @MaxLength(150, { message: 'Bio tối đa 150 ký tự' })
@@ -42,7 +45,7 @@ export class UpdateProfileDto {
     example: 'https://github.com/nguyenvana',
     description: 'Liên kết cá nhân hợp lệ. Gửi chuỗi rỗng để xóa liên kết.',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: TransformFnParams) => trimString(value))
   @IsOptional()
   @IsString()
   @MaxLength(200, { message: 'Link không được vượt quá 200 ký tự' })
@@ -62,7 +65,7 @@ export class SearchUsersQueryDto {
     example: 'ak',
     description: 'Từ khóa tìm kiếm username, tối thiểu 2 ký tự',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: TransformFnParams) => trimString(value))
   @IsString()
   @MinLength(2, { message: 'Từ khóa tìm kiếm phải có ít nhất 2 ký tự' })
   @MaxLength(30, { message: 'Từ khóa tìm kiếm không được vượt quá 30 ký tự' })

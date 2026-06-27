@@ -19,16 +19,13 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
 import { UsersService } from '../services/users.service';
 import { SearchUsersQueryDto, UpdateProfileDto } from '../dto/users.dto';
 import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
-
-type AuthenticatedRequest = {
-  user: {
-    _id: string;
-  };
-};
+import type {
+  AuthenticatedRequest,
+  OptionalAuthenticatedRequest,
+} from '../../../common/types/authenticated-request';
 
 type UploadFile = {
   buffer: Buffer;
@@ -56,7 +53,10 @@ export class UsersController {
   @ApiOperation({ summary: 'Lấy thông tin cá nhân của người dùng bất kỳ' })
   @UseGuards(OptionalJwtAuthGuard)
   @Get('profile/:username')
-  async getProfile(@Request() req: any, @Param('username') username: string) {
+  async getProfile(
+    @Request() req: OptionalAuthenticatedRequest,
+    @Param('username') username: string,
+  ) {
     // Nếu người dùng có gửi Token (đã login), ta lấy ID của họ, nếu không thì để undefined
     const currentUserId = req.user?._id;
     return this.usersService.getProfileByUsername(username, currentUserId);
@@ -67,7 +67,7 @@ export class UsersController {
   @UseGuards(AuthGuard('jwt'))
   @Patch('me')
   async updateMyProfile(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Body() updateProfileDto: UpdateProfileDto,
   ) {
     // req.user._id được lấy ra nhờ tấm khiên AuthGuard kiểm tra Token
@@ -81,7 +81,6 @@ export class UsersController {
   @UseGuards(AuthGuard('jwt'))
   @UseInterceptors(
     FileInterceptor('avatar', {
-      storage: memoryStorage(),
       limits: {
         fileSize: 5 * 1024 * 1024,
         files: 1,
@@ -108,7 +107,7 @@ export class UsersController {
   @ApiOperation({ summary: 'Người dùng tự xóa mềm tài khoản của chính mình' })
   @UseGuards(AuthGuard('jwt'))
   @Delete('me') // Đường dẫn API sẽ là: DELETE /users/me
-  async deleteMyAccount(@Request() req: any) {
+  async deleteMyAccount(@Request() req: AuthenticatedRequest) {
     const userId = req.user._id; // Tự động lấy ID của chính họ từ JWT Token sau khi đăng nhập
     return this.usersService.softDeleteUser(userId);
   }
