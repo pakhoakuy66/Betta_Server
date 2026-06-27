@@ -1,8 +1,15 @@
 // src/modules/auth/strategies/jwt.strategy.ts
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { JwtRequestUser } from '../../../common/types/authenticated-request';
+
+type JwtPayload = {
+  sub: string;
+  email?: string;
+  username?: string;
+};
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -27,7 +34,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   // Payload là dữ liệu ta đã mã hóa vào token lúc Login
-  async validate(payload: any) {
+  validate(payload: JwtPayload): JwtRequestUser {
     // Trả về dữ liệu để gán vào req.user
     return {
       _id: payload.sub,

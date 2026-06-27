@@ -16,7 +16,7 @@ import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { MailService } from './mail.service';
 import { generateUserPublicId } from '../../users/utils/generate-public-id';
-import { User } from '../../users/schemas/user.schema';
+import { DEFAULT_AVATAR_ID, User } from '../../users/schemas/user.schema';
 import {
   RegisterDto,
   LoginDto,
@@ -128,6 +128,7 @@ export class AuthService {
       email: user.email,
       phone: user.phone,
       avatar: user.avatar ?? null,
+      hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
       streakCount: user.streakCount ?? 0,
       status: user.status ?? 'active',
     };
@@ -321,7 +322,7 @@ export class AuthService {
 
     if (activeLockedUntil) {
       this.logger.warn(
-        `Account temporarily locked after repeated login failures: ${userId}`,
+        `Account temporarily locked after repeated login failures: ${userId.toString()}`,
       );
     }
 
@@ -445,10 +446,7 @@ export class AuthService {
     }
 
     if (!isPasswordValid) {
-      const lockedUntil = await this.recordFailedLoginAttempt(
-        user._id as Types.ObjectId,
-        now,
-      );
+      const lockedUntil = await this.recordFailedLoginAttempt(user._id, now);
 
       if (lockedUntil) {
         this.throwLoginLocked(lockedUntil);
@@ -508,7 +506,7 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
-    this.logger.log(`User logged in: ${authenticatedUser._id}`);
+    this.logger.log(`User logged in: ${authenticatedUser._id.toString()}`);
 
     return {
       message: 'Đăng nhập thành công',
@@ -792,7 +790,7 @@ export class AuthService {
 
     await user.save();
 
-    this.logger.log(`User changed password: ${user._id}`);
+    this.logger.log(`User changed password: ${user._id.toString()}`);
 
     return {
       success: true,

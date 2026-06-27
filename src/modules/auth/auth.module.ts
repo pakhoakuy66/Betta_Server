@@ -26,7 +26,7 @@ import { AuthRateLimitService } from './services/auth-rate-limit.service';
     // Cấu hình JwtModule động từ file .env
     JwtModule.registerAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
+      useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET'),
         // signOptions: { expiresIn: '1d' }, // Mặc định giá trị nếu Không ghi đè
       }),

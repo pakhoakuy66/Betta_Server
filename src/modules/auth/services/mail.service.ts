@@ -55,11 +55,10 @@ export class MailService {
 
       await this.transporter.sendMail(mailOptions);
       this.logger.log(`✅ [MailService] Đã gửi OTP thành công tới: ${to}`);
-    } catch (error) {
-      this.logger.error(
-        `❌ [MailService] Lỗi gửi email tới ${to}:`,
-        error.stack,
-      );
+    } catch (error: unknown) {
+      const stack = error instanceof Error ? error.stack : undefined;
+
+      this.logger.error(`❌ [MailService] Lỗi gửi email tới ${to}:`, stack);
       // Enterprise Note: Chỉ log lại để điều tra, KHÔNG throw error làm hỏng (crash) luồng response API của hệ thống
     }
   }

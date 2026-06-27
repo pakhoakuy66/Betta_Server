@@ -3,6 +3,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import type { Express } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -17,7 +18,7 @@ async function bootstrap() {
   }
 
   if (trustProxyHops > 0) {
-    const expressApp = app.getHttpAdapter().getInstance();
+    const expressApp = app.getHttpAdapter().getInstance() as Express;
     expressApp.set('trust proxy', trustProxyHops);
   }
 
@@ -90,4 +91,4 @@ async function bootstrap() {
   logger.log(`Swagger Docs: http://localhost:${port}/api/v1/docs`);
   logger.log(`==========================================================`);
 }
-bootstrap();
+void bootstrap();

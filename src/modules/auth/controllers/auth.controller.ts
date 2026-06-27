@@ -12,6 +12,7 @@ import {
 import type { Request as ExpressRequest } from 'express';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
+import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
 import { AuthService } from '../services/auth.service';
 import { AuthRateLimitService } from '../services/auth-rate-limit.service';
 import {
@@ -104,7 +105,10 @@ export class AuthController {
   @ApiOperation({ summary: 'Đổi mật khẩu khi người dùng đã đăng nhập' })
   @UseGuards(AuthGuard('jwt'))
   @Patch('change-password')
-  async changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
+  async changePassword(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ) {
     return this.authService.changePassword(req.user._id, dto);
   }
 
@@ -112,7 +116,7 @@ export class AuthController {
   @ApiBearerAuth('access-token') // Để hiện nút nhập Token trên Swagger
   @UseGuards(AuthGuard('jwt'))
   @Post('logout')
-  async logout(@Request() req: any) {
+  async logout(@Request() req: AuthenticatedRequest) {
     // req.user được gán giá trị từ JwtStrategy.validate() của ông
     const userId = req.user._id;
     return this.authService.logout(userId);
@@ -123,7 +127,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Lấy thông tin cá nhân hiện tại' })
   @UseGuards(AuthGuard('jwt'))
   @Get('me')
-  getProfile(@Request() req: any) {
+  getProfile(@Request() req: AuthenticatedRequest) {
     return this.authService.getCurrentUser(req.user._id);
   }
 }
