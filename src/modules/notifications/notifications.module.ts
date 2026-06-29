@@ -6,11 +6,13 @@ import {
   Notification,
   NotificationSchema,
 } from './schemas/notifications.schema';
+import { User, UserSchema } from '../users/schemas/user.schema';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Notification.name, schema: NotificationSchema },
+      { name: User.name, schema: UserSchema },
     ]),
   ],
   providers: [NotificationsService],

@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage, Types } from 'mongoose';
 import {
@@ -6,6 +11,8 @@ import {
   NotificationType,
   NOTIFICATION_TTL_MS,
 } from '../schemas/notifications.schema';
+import { User } from '../../users/schemas/user.schema';
+import { NotificationsQueryDto } from '../dto/notifications-query.dto';
 
 const MAX_VISIBLE_NOTIFICATION_ACTORS = 3;
 
@@ -30,6 +37,53 @@ type CreateReactionNotificationInput = {
   postPublicId: string;
 };
 
+type NotificationActorResponse = {
+  id: string;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+};
+
+type NotificationResponse = {
+  id: string;
+  type: NotificationType;
+  actors: NotificationActorResponse[];
+  actorCount: number;
+  otherCount: number;
+  content: string;
+  targetId?: string;
+  targetPublicId?: string;
+  isRead: boolean;
+  createdAt: Date;
+};
+
+type NotificationLeanDocument = {
+  _id: Types.ObjectId;
+  type: NotificationType;
+  actorIds: Types.ObjectId[];
+  actorCount: number;
+  otherCount: number;
+  content: string;
+  targetId?: Types.ObjectId;
+  targetPublicId?: string;
+  isRead: boolean;
+  createdAt: Date;
+};
+
+type ActorLeanDocument = {
+  _id: Types.ObjectId;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+};
+
+type NotificationListFilter = {
+  recipientId: Types.ObjectId;
+  isRead?: boolean;
+};
+
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
@@ -37,7 +91,156 @@ export class NotificationsService {
   constructor(
     @InjectModel(Notification.name)
     private readonly notificationModel: Model<Notification>,
+    @InjectModel(User.name)
+    private readonly userModel: Model<User>,
   ) {}
+
+  async getNotifications(userId: string, query: NotificationsQueryDto) {
+    const userObjectId = this.toObjectId(userId);
+    const page = query.page;
+    const limit = query.limit;
+    const skip = (page - 1) * limit;
+
+    const filter: NotificationListFilter = {
+      recipientId: userObjectId,
+    };
+
+    if (query.unreadOnly === true) {
+      filter.isRead = false;
+    }
+
+    const [notifications, unreadCount] = await Promise.all([
+      this.notificationModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit + 1)
+        .select(
+          '_id type actorIds actorCount otherCount content targetId targetPublicId isRead createdAt',
+        )
+        .lean<NotificationLeanDocument[]>()
+        .exec(),
+
+      this.notificationModel
+        .countDocuments({
+          recipientId: userObjectId,
+          isRead: false,
+        })
+        .exec(),
+    ]);
+
+    const hasMore = notifications.length > limit;
+    const pageNotifications = notifications.slice(0, limit);
+    const actorMap = await this.getActorMap(pageNotifications);
+
+    return {
+      success: true,
+      data: pageNotifications.map((notification) =>
+        this.toNotificationResponse(notification, actorMap),
+      ),
+      pagination: {
+        page,
+        limit,
+        hasMore,
+      },
+      unreadCount,
+    };
+  }
+
+  async getUnreadCount(userId: string) {
+    const userObjectId = this.toObjectId(userId);
+
+    const unreadCount = await this.notificationModel
+      .countDocuments({
+        recipientId: userObjectId,
+        isRead: false,
+      })
+      .exec();
+
+    return {
+      success: true,
+      data: {
+        unreadCount,
+      },
+    };
+  }
+
+  async markAsRead(userId: string, notificationId: string) {
+    const userObjectId = this.toObjectId(userId);
+    const notificationObjectId = this.toObjectId(notificationId);
+
+    const updateResult = await this.notificationModel
+      .updateOne(
+        {
+          _id: notificationObjectId,
+          recipientId: userObjectId,
+          isRead: false,
+        },
+        {
+          $set: {
+            isRead: true,
+          },
+        },
+      )
+      .exec();
+
+    if (updateResult.modifiedCount === 1) {
+      return {
+        success: true,
+        message: 'Đã đánh dấu thông báo là đã đọc',
+        data: {
+          modifiedCount: 1,
+        },
+      };
+    }
+
+    const existingNotification = await this.notificationModel
+      .findOne({
+        _id: notificationObjectId,
+        recipientId: userObjectId,
+      })
+      .select('_id')
+      .lean<{ _id: Types.ObjectId }>()
+      .exec();
+
+    if (!existingNotification) {
+      throw new NotFoundException('Thông báo không tồn tại');
+    }
+
+    return {
+      success: true,
+      message: 'Thông báo đã được đọc trước đó',
+      data: {
+        modifiedCount: 0,
+      },
+    };
+  }
+
+  async markAllAsRead(userId: string) {
+    const userObjectId = this.toObjectId(userId);
+
+    const result = await this.notificationModel
+      .updateMany(
+        {
+          recipientId: userObjectId,
+          isRead: false,
+        },
+        {
+          $set: {
+            isRead: true,
+          },
+        },
+      )
+      .exec();
+
+    return {
+      success: true,
+      message: 'Đã đánh dấu tất cả thông báo là đã đọc',
+      data: {
+        modifiedCount: result.modifiedCount,
+      },
+    };
+  }
 
   async createFollowNotification({
     followerId,
@@ -225,6 +428,8 @@ export class NotificationsService {
           dedupeKey,
           isRead: false,
           expiresAt,
+          createdAt: { $ifNull: ['$createdAt', now] },
+          updatedAt: now,
           _currentActorIds: { $ifNull: ['$actorIds', []] },
           _currentCountedActorIds: { $ifNull: ['$countedActorIds', []] },
         },
@@ -328,5 +533,76 @@ export class NotificationsService {
       `[NOTIFICATION_REACTION_CREATE_FAILED] actor=${actorId.toString()} post=${postPublicId}`,
       error instanceof Error ? error.stack : String(error),
     );
+  }
+
+  private async getActorMap(
+    notifications: NotificationLeanDocument[],
+  ): Promise<Map<string, NotificationActorResponse>> {
+    const actorIds = [
+      ...new Set(
+        notifications.flatMap((notification) =>
+          notification.actorIds.map((actorId) => actorId.toString()),
+        ),
+      ),
+    ];
+
+    if (actorIds.length === 0) {
+      return new Map();
+    }
+
+    const actors = await this.userModel
+      .find({
+        _id: {
+          $in: actorIds.map((id) => new Types.ObjectId(id)),
+        },
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id publicId username fullname avatar')
+      .lean<ActorLeanDocument[]>()
+      .exec();
+
+    return new Map(
+      actors.map((actor) => [
+        actor._id.toString(),
+        {
+          id: actor._id.toString(),
+          publicId: actor.publicId,
+          username: actor.username,
+          fullname: actor.fullname,
+          avatar: actor.avatar,
+        },
+      ]),
+    );
+  }
+
+  private toNotificationResponse(
+    notification: NotificationLeanDocument,
+    actorMap: Map<string, NotificationActorResponse>,
+  ): NotificationResponse {
+    const actors = notification.actorIds
+      .map((actorId) => actorMap.get(actorId.toString()))
+      .filter((actor): actor is NotificationActorResponse => Boolean(actor));
+
+    return {
+      id: notification._id.toString(),
+      type: notification.type,
+      actors,
+      actorCount: notification.actorCount,
+      otherCount: notification.otherCount,
+      content: notification.content,
+      targetId: notification.targetId?.toString(),
+      targetPublicId: notification.targetPublicId,
+      isRead: notification.isRead,
+      createdAt: notification.createdAt,
+    };
+  }
+
+  private toObjectId(value: string): Types.ObjectId {
+    if (!Types.ObjectId.isValid(value)) {
+      throw new BadRequestException('ID không hợp lệ');
+    }
+
+    return new Types.ObjectId(value);
   }
 }
