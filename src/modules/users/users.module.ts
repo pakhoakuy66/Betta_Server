@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { UsersService } from './services/users.service';
 import { UsersController } from './controllers/users.controller';
+import { UploadsModule } from '../uploads/uploads.module';
 import { User, UserSchema } from './schemas/user.schema';
 import {
   Relationship,
@@ -11,6 +12,7 @@ import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 
 @Module({
   imports: [
+    UploadsModule,
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: Relationship.name, schema: RelationshipSchema },

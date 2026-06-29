@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
+import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
 import { RelationshipService } from '../services/relationship.service';
 
 @ApiTags('Relationships (Followers)')
@@ -21,14 +22,17 @@ export class RelationshipController {
 
   @ApiOperation({ summary: 'Theo dõi người dùng' })
   @Post('follow/:userId')
-  async followUser(@Request() req: any, @Param('userId') targetUserId: string) {
+  async followUser(
+    @Request() req: AuthenticatedRequest,
+    @Param('userId') targetUserId: string,
+  ) {
     return this.relationshipService.followUser(req.user._id, targetUserId);
   }
 
   @ApiOperation({ summary: 'Lấy danh sách người theo dõi mình (Followers)' })
   @Get('followers/:userId')
   async getFollowers(
-    @Request() req: any, // Lấy request để có thông tin user đang đăng nhập
+    @Request() req: AuthenticatedRequest, // Lấy request để có thông tin user đang đăng nhập
     @Param('userId') userId: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
@@ -45,7 +49,7 @@ export class RelationshipController {
   @ApiOperation({ summary: 'Lấy danh sách mình đang theo dõi (Following)' })
   @Get('following/:userId')
   async getFollowing(
-    @Request() req: any, // Lấy request để có thông tin user đang đăng nhập
+    @Request() req: AuthenticatedRequest, // Lấy request để có thông tin user đang đăng nhập
     @Param('userId') userId: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
@@ -63,7 +67,7 @@ export class RelationshipController {
   @ApiOperation({ summary: 'Bỏ theo dõi một người dùng' })
   @Delete('unfollow/:userId')
   async unfollowUser(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Param('userId') targetUserId: string,
   ) {
     return this.relationshipService.unfollowUser(req.user._id, targetUserId);

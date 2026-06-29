@@ -1,14 +1,21 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Block, BlockSchema } from './schemas/block.schema';
+import {
+  Relationship,
+  RelationshipSchema,
+} from './schemas/relationship.schema';
+import { User, UserSchema } from '../users/schemas/user.schema';
 import { BlockController } from './controllers/block.controller';
 import { BlockService } from './services/block.service';
-import { RelationshipModule } from './relationship.module';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([{ name: Block.name, schema: BlockSchema }]),
-    RelationshipModule, // Import để có thể xài ké hàm unfollow của module bên kia
+    MongooseModule.forFeature([
+      { name: Block.name, schema: BlockSchema },
+      { name: Relationship.name, schema: RelationshipSchema },
+      { name: User.name, schema: UserSchema },
+    ]),
   ],
   controllers: [BlockController],
   providers: [BlockService],

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
@@ -13,6 +14,8 @@ import { UploadsModule } from './modules/uploads/uploads.module';
 import { UsersModule } from './modules/users/users.module';
 import { RelationshipModule } from './modules/relationshipModule/relationship.module';
 import { BlockModule } from './modules/relationshipModule/block.module';
+import { CronModule } from './modules/cron/cron.module';
+import { ReactionModule } from './modules/reactions/reaction.module';
 
 @Module({
   imports: [
@@ -20,23 +23,26 @@ import { BlockModule } from './modules/relationshipModule/block.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
+      useFactory: (configService: ConfigService) => ({
         uri: configService.get<string>('DATABASE_URL'),
       }),
       inject: [ConfigService],
     }),
-    AuthModule, 
-    PostsModule, 
-    RecapModule, 
-    StreakModule, 
-    NotificationsModule, 
-    ReportsModule, 
-    UploadsModule, 
+    AuthModule,
+    PostsModule,
+    RecapModule,
+    StreakModule,
+    NotificationsModule,
+    ReportsModule,
+    UploadsModule,
     UsersModule,
     RelationshipModule,
-    BlockModule
+    BlockModule,
+    CronModule,
+    ReactionModule,
   ],
   controllers: [AppController],
   providers: [AppService],
