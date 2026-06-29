@@ -125,3 +125,10 @@ export class User extends Document {
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
+
+UserSchema.index({
+  isDeleted: 1,
+  status: 1,
+  streakCount: 1,
+  _id: 1,
+});

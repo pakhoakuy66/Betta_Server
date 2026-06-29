@@ -13,6 +13,7 @@ import {
   UploadedImage,
   UploadsService,
 } from '../../uploads/services/uploads.service';
+import { StreakService } from '../../streak/services/streak.service';
 import { CreatePostDto } from '../dto/create-post.dto';
 import {
   generatePostPublicId,
@@ -70,6 +71,7 @@ export class PostsService {
     private readonly blockModel: Model<Block>,
     @InjectModel(Reaction.name)
     private readonly reactionModel: Model<Reaction>,
+    private readonly streakService: StreakService,
   ) {}
 
   async createPost(
@@ -122,10 +124,20 @@ export class PostsService {
         })),
       });
 
-      await this.userModel.updateOne(
-        { _id: userObjectId },
-        { $inc: { postsCount: 1 } },
-      );
+      const postCreatedAt =
+        (createdPost.get('createdAt') as Date) ?? new Date();
+
+      await this.userModel
+        .updateOne(
+          { _id: userObjectId },
+          {
+            $inc: { postsCount: 1 },
+            $set: { lastActive: postCreatedAt },
+          },
+        )
+        .exec();
+
+      await this.streakService.recordPostCreated(userObjectId, postCreatedAt);
 
       return {
         success: true,
