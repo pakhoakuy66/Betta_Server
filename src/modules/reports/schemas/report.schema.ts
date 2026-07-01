@@ -1,49 +1,135 @@
-// report post và account
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
+export enum ReportTargetType {
+  POST = 'POST',
+  USER = 'USER',
+}
+
+export enum ReportStatus {
+  PENDING = 'pending',
+  REVIEWING = 'reviewing',
+  RESOLVED = 'resolved',
+  REJECTED = 'rejected',
+}
+
+export enum ReportReasonGroup {
+  VIOLATION_CONTENT = 'violation_content',
+  INAPPROPRIATE_CONTENT = 'inappropriate_content',
+  IMPERSONATION = 'impersonation',
+}
+
+@Schema({ _id: false })
+export class ReportImageSnapshot {
+  @Prop({ type: String, required: true })
+  url!: string;
+
+  @Prop({ type: String, required: true })
+  publicId!: string;
+}
+
+export const ReportImageSnapshotSchema =
+  SchemaFactory.createForClass(ReportImageSnapshot);
+
+@Schema({ _id: false })
+export class ReportTargetSnapshot {
+  // Report Post
+  @Prop({ type: String, default: '' })
+  publicId!: string;
+
+  @Prop({ type: Types.ObjectId, default: null })
+  authorId!: Types.ObjectId | null;
+
+  @Prop({ type: String, default: '' })
+  authorUsername!: string;
+
+  @Prop({ type: String, default: '' })
+  content!: string;
+
+  @Prop({ type: [ReportImageSnapshotSchema], default: [] })
+  images!: ReportImageSnapshot[];
+
+  @Prop({ type: Date, default: null })
+  createdAt!: Date | null;
+
+  @Prop({ type: Date, default: null })
+  expireAt!: Date | null;
+
+  // Report User
+  @Prop({ type: String, default: '' })
+  username!: string;
+
+  @Prop({ type: String, default: '' })
+  fullname!: string;
+
+  @Prop({ type: String, default: '' })
+  avatar!: string;
+
+  @Prop({ type: String, default: '' })
+  bio!: string;
+
+  @Prop({ type: String, default: '' })
+  targetStatus!: string;
+}
+
+export const ReportTargetSnapshotSchema =
+  SchemaFactory.createForClass(ReportTargetSnapshot);
+
 @Schema({ timestamps: true })
 export class Report extends Document {
-  // 1. NGƯỜI BÁO CÁO
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   reporterId!: Types.ObjectId;
 
-  // 2. ĐỐI TƯỢNG BỊ BÁO CÁO (Sử dụng Đa hình)
-  @Prop({ type: String, required: true, enum: ['POST', 'USER'], index: true })
-  targetType!: string;
-
-  @Prop({ type: Types.ObjectId, required: true, index: true })
-  targetId!: Types.ObjectId; // Có thể là PostId hoặc UserId
-
-  // 3. NỘI DUNG VI PHẠM (Tối ưu cho ReportAccountModal tầng 2)
   @Prop({
+    type: String,
     required: true,
-    enum: [
-      'Đăng nội dung không nên xuất hiện trên Betta',
-      'Tài khoản giả mạo ai đó',
-      'Vi phạm nội dung', // Cho Post vì Post không có tầng 1
-    ],
-    default: 'Vi phạm nội dung',
-  })
-  reasonGroup!: string; // Tương ứng với 'step' (ParentKey) trong FE Account
-
-  @Prop({ required: true })
-  reasonDetail!: string; // Chính là 'selectedDetail' hoặc 'selectedReason' cuối cùng
-
-  // 4. TRẠNG THÁI XỬ LÝ
-  @Prop({
-    default: 'pending',
-    enum: ['pending', 'processing', 'resolved', 'dismissed'],
+    enum: Object.values(ReportTargetType),
     index: true,
   })
-  status!: string;
+  targetType!: ReportTargetType;
 
-  // 5. GHI CHÚ CỦA ADMIN (Dành cho nội bộ)
-  @Prop({ default: '' })
+  @Prop({ type: Types.ObjectId, required: true, index: true })
+  targetId!: Types.ObjectId;
+
+  @Prop({
+    type: String,
+    required: true,
+    enum: Object.values(ReportReasonGroup),
+    default: ReportReasonGroup.VIOLATION_CONTENT,
+    index: true,
+  })
+  reasonGroup!: ReportReasonGroup;
+
+  @Prop({ type: String, required: true, trim: true, maxlength: 200 })
+  reasonDetail!: string;
+
+  @Prop({ type: String, default: '', trim: true, maxlength: 1000 })
+  description!: string;
+
+  @Prop({
+    type: String,
+    default: ReportStatus.PENDING,
+    enum: Object.values(ReportStatus),
+    index: true,
+  })
+  status!: ReportStatus;
+
+  @Prop({ type: ReportTargetSnapshotSchema, default: {} })
+  targetSnapshot!: ReportTargetSnapshot;
+
+  @Prop({ type: String, default: '', trim: true, maxlength: 1000 })
   adminNote!: string;
 }
 
 export const ReportSchema = SchemaFactory.createForClass(Report);
 
-// Index kép: Một người không thể báo cáo cùng 1 nội dung quá nhiều lần trong thời gian ngắn
-ReportSchema.index({ reporterId: 1, targetId: 1 }, { unique: true });
+ReportSchema.index({
+  reporterId: 1,
+  targetType: 1,
+  targetId: 1,
+  createdAt: -1,
+});
+
+ReportSchema.index({ reporterId: 1, createdAt: -1 });
+ReportSchema.index({ targetType: 1, status: 1, createdAt: -1 });
+ReportSchema.index({ status: 1, createdAt: -1 });
