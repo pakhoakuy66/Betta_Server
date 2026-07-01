@@ -426,10 +426,7 @@ export class NotificationsService {
           targetId: postId,
           targetPublicId: postPublicId,
           dedupeKey,
-          isRead: false,
-          expiresAt,
           createdAt: { $ifNull: ['$createdAt', now] },
-          updatedAt: now,
           _currentActorIds: { $ifNull: ['$actorIds', []] },
           _currentCountedActorIds: { $ifNull: ['$countedActorIds', []] },
         },
@@ -441,6 +438,31 @@ export class NotificationsService {
           },
           _actorAlreadyCounted: {
             $in: [actorId, '$_currentCountedActorIds'],
+          },
+        },
+      },
+      {
+        $set: {
+          isRead: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$isRead', false] },
+              false,
+            ],
+          },
+          expiresAt: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$expiresAt', expiresAt] },
+              expiresAt,
+            ],
+          },
+          updatedAt: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$updatedAt', now] },
+              now,
+            ],
           },
         },
       },
