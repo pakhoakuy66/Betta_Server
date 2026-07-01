@@ -20,7 +20,11 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UsersService } from '../services/users.service';
-import { SearchUsersQueryDto, UpdateProfileDto } from '../dto/users.dto';
+import {
+  SearchUsersQueryDto,
+  UpdateProfileDto,
+  DeleteMyAccountDto,
+} from '../dto/users.dto';
 import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
 import type {
   AuthenticatedRequest,
@@ -106,10 +110,12 @@ export class UsersController {
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Người dùng tự xóa mềm tài khoản của chính mình' })
   @UseGuards(AuthGuard('jwt'))
-  @Delete('me') // Đường dẫn API sẽ là: DELETE /users/me
-  async deleteMyAccount(@Request() req: AuthenticatedRequest) {
-    const userId = req.user._id; // Tự động lấy ID của chính họ từ JWT Token sau khi đăng nhập
-    return this.usersService.softDeleteUser(userId);
+  @Delete('me')
+  async deleteMyAccount(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: DeleteMyAccountDto,
+  ) {
+    return this.usersService.softDeleteUser(req.user._id, dto.currentPassword);
   }
 
   // @ApiOperation({

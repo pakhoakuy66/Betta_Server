@@ -4,9 +4,11 @@ import {
   BadRequestException,
   ConflictException,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model, Types, type ClientSession } from 'mongoose';
+import * as bcrypt from 'bcrypt';
 import {
   DEFAULT_AVATAR_ID,
   DEFAULT_AVATAR_URL,
@@ -17,6 +19,14 @@ import { UserProfileResponse } from '../interfaces/users.interface';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { UploadsService } from '../../uploads/services/uploads.service';
+
+const DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES = 3;
+const TRANSIENT_TRANSACTION_ERROR_LABEL = 'TransientTransactionError';
+
+type MongoErrorWithLabels = {
+  errorLabels?: string[];
+  hasErrorLabel?: (label: string) => boolean;
+};
 
 type UploadFile = {
   buffer: Buffer;
@@ -33,12 +43,72 @@ type CountResult = {
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
   constructor(
+    @InjectConnection() private readonly connection: Connection,
     @InjectModel(User.name) private readonly userModel: Model<User>,
     @InjectModel(Relationship.name)
     private readonly relationshipModel: Model<Relationship>,
     @InjectModel(Block.name) private readonly blockModel: Model<Block>,
     private readonly uploadsService: UploadsService,
   ) {}
+
+  private isMongoErrorWithLabels(
+    error: unknown,
+  ): error is MongoErrorWithLabels {
+    return typeof error === 'object' && error !== null;
+  }
+
+  private isTransientTransactionError(error: unknown): boolean {
+    if (!this.isMongoErrorWithLabels(error)) return false;
+
+    if (typeof error.hasErrorLabel === 'function') {
+      return error.hasErrorLabel(TRANSIENT_TRANSACTION_ERROR_LABEL);
+    }
+
+    return (
+      Array.isArray(error.errorLabels) &&
+      error.errorLabels.includes(TRANSIENT_TRANSACTION_ERROR_LABEL)
+    );
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private async runInTransaction<T>(
+    operation: (session: ClientSession) => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+
+    for (
+      let attempt = 1;
+      attempt <= DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES;
+      attempt += 1
+    ) {
+      const session = await this.connection.startSession();
+
+      try {
+        const result = await session.withTransaction(() => operation(session));
+        return result as T;
+      } catch (error) {
+        lastError = error;
+
+        if (
+          !this.isTransientTransactionError(error) ||
+          attempt === DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES
+        ) {
+          throw error;
+        }
+
+        this.logger.warn(
+          `Retrying delete account transaction. attempt=${attempt}, error=${this.getErrorMessage(error)}`,
+        );
+      } finally {
+        await session.endSession();
+      }
+    }
+
+    throw lastError;
+  }
 
   // Search
   private escapeRegExp(value: string): string {
@@ -429,63 +499,141 @@ export class UsersService {
   }
 
   // Trong UsersService (Chuyển đổi trạng thái thay vì xóa hẳn)
-  async softDeleteUser(userId: string) {
+  async softDeleteUser(userId: string, currentPassword: string) {
+    if (!Types.ObjectId.isValid(userId)) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
     const uid = new Types.ObjectId(userId);
 
-    // 1. Kiểm tra xem user có tồn tại và đã bị xóa trước đó chưa
-    const user = await this.userModel.findOne({ _id: uid, isDeleted: false });
+    const user = await this.userModel
+      .findOne({
+        _id: uid,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('+password')
+      .exec();
+
     if (!user) {
       throw new NotFoundException(
         'Không tìm thấy người dùng hoặc tài khoản đã bị xóa trước đó',
       );
     }
 
-    // 2. Lấy danh sách những người mà user này đang follow
-    const followings = await this.relationshipModel
-      .find({ followerId: uid })
-      .lean();
-    const followingIds = followings.map((rel) => rel.followingId);
+    if (!user.password) {
+      throw new BadRequestException(
+        'Tài khoản này chưa có mật khẩu để xác nhận thao tác xóa',
+      );
+    }
 
-    // 3. Lấy danh sách những người đang follow user này
-    const followers = await this.relationshipModel
-      .find({ followingId: uid })
-      .lean();
-    const followerIds = followers.map((rel) => rel.followerId);
+    const isPasswordValid = await bcrypt.compare(
+      currentPassword,
+      user.password,
+    );
 
-    // 4. TỰ ĐỘNG CẬP NHẬT: Giảm bộ đếm của những người liên quan
-    await Promise.all([
-      // Trừ 1 followersCount của tất cả những người mà user này từng follow
-      this.userModel.updateMany(
-        { _id: { $in: followingIds } },
-        { $inc: { followersCount: -1 } },
-      ),
-      // Trừ 1 followingCount của tất cả những fan đang follow user này
-      this.userModel.updateMany(
-        { _id: { $in: followerIds } },
-        { $inc: { followingCount: -1 } },
-      ),
-    ]);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Mật khẩu không chính xác');
+    }
 
-    // 5. Cập nhật trạng thái Xóa mềm (Soft Delete) cho chính chủ
-    await this.userModel.findByIdAndUpdate(uid, {
-      $set: {
-        isDeleted: true,
-        deletedAt: new Date(),
-        status: 'banned',
-        refreshToken: null, // null vì field này vẫn cần tồn tại để check
-        followersCount: 0, // Reset luôn bộ đếm của tài khoản bị xóa về 0
-        followingCount: 0, // Reset luôn bộ đếm của tài khoản bị xóa về 0
-      },
-      $unset: {
-        forgotPasswordOtp: '',
-        forgotPasswordExpiry: '', // xóa hẳn vì không cần giữ field
-      },
+    await this.runInTransaction(async (session) => {
+      const now = new Date();
+
+      const claimResult = await this.userModel
+        .updateOne(
+          {
+            _id: uid,
+            isDeleted: false,
+            status: 'active',
+          },
+          {
+            $set: {
+              isDeleted: true,
+              deletedAt: now,
+              refreshToken: null,
+              followersCount: 0,
+              followingCount: 0,
+            },
+            $unset: {
+              forgotPasswordOtp: '',
+              forgotPasswordExpiry: '',
+              forgotPasswordAttempts: '',
+              failedLoginAttempts: '',
+              failedLoginWindowStartedAt: '',
+              lockedUntil: '',
+            },
+          },
+          { session },
+        )
+        .exec();
+
+      if (claimResult.matchedCount !== 1) {
+        throw new NotFoundException(
+          'Không tìm thấy người dùng hoặc tài khoản đã bị xóa trước đó',
+        );
+      }
+
+      const followings = await this.relationshipModel
+        .find({ followerId: uid })
+        .select('followingId')
+        .session(session)
+        .lean()
+        .exec();
+
+      const followers = await this.relationshipModel
+        .find({ followingId: uid })
+        .select('followerId')
+        .session(session)
+        .lean()
+        .exec();
+
+      const followingIds = followings.map((rel) => rel.followingId);
+      const followerIds = followers.map((rel) => rel.followerId);
+
+      await this.relationshipModel
+        .deleteMany({
+          $or: [{ followerId: uid }, { followingId: uid }],
+        })
+        .session(session)
+        .exec();
+
+      await this.blockModel
+        .deleteMany({
+          $or: [{ blockerId: uid }, { blockedId: uid }],
+        })
+        .session(session)
+        .exec();
+
+      if (followingIds.length > 0) {
+        await this.userModel
+          .updateMany(
+            {
+              _id: { $in: followingIds },
+              followersCount: { $gt: 0 },
+            },
+            { $inc: { followersCount: -1 } },
+          )
+          .session(session)
+          .exec();
+      }
+
+      if (followerIds.length > 0) {
+        await this.userModel
+          .updateMany(
+            {
+              _id: { $in: followerIds },
+              followingCount: { $gt: 0 },
+            },
+            { $inc: { followingCount: -1 } },
+          )
+          .session(session)
+          .exec();
+      }
     });
 
     return {
       success: true,
-      message:
-        'Đã ẩn tài khoản và tự động cập nhật lại bộ đếm hệ thống thành công!',
+      message: 'Đã xóa tài khoản thành công',
     };
   }
 

@@ -1,4 +1,4 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   IsOptional,
@@ -8,6 +8,7 @@ import {
   IsUrl,
   Matches,
   ValidateIf,
+  IsNotEmpty,
   IsInt,
   Max,
   Min,
@@ -91,4 +92,20 @@ export class SearchUsersQueryDto {
   @Min(1, { message: 'Limit tối thiểu là 1' })
   @Max(20, { message: 'Limit tối đa là 20' })
   limit: number = 10;
+}
+
+export class DeleteMyAccountDto {
+  @ApiProperty({
+    example: 'MyPassword@123',
+    description: 'Mật khẩu hiện tại để xác nhận xóa tài khoản',
+  })
+  @IsString({ message: 'Mật khẩu xác nhận phải là chuỗi' })
+  @IsNotEmpty({ message: 'Vui lòng nhập mật khẩu để xác nhận xóa tài khoản' })
+  @Matches(/\S/, {
+    message: 'Vui lòng nhập mật khẩu để xác nhận xóa tài khoản',
+  })
+  @MaxLength(128, {
+    message: 'Mật khẩu xác nhận không được vượt quá 128 ký tự',
+  })
+  currentPassword!: string;
 }
