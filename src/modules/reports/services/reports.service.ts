@@ -5,10 +5,12 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
-  InternalServerErrorException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { InjectModel } from '@nestjs/mongoose';
 import {
   Connection,
@@ -25,12 +27,15 @@ import {
 } from '../schemas/report.schema';
 import { ReportPostDto } from '../dto/report-post.dto';
 import { ReportUserDto } from '../dto/report-user.dto';
+import { ReportIssueDto } from '../dto/report-issue.dto';
 import { Post } from '../../posts/schemas/post.schema';
 import { User } from '../../users/schemas/user.schema';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { ReportCooldown } from '../schemas/report-cooldown.schema';
+import { SystemReport } from '../schemas/system-report.schema';
 import { isValidPostPublicId } from '../../posts/utils/generate-post-public-id';
+import { UploadsService } from '../../uploads/services/uploads.service';
 
 const REPORT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const REPORT_RATE_LIMIT_MAX = 10;
@@ -39,6 +44,9 @@ const USER_REPORT_COOLDOWN_MS = 2 * 24 * 60 * 60 * 1000;
 const TRANSACTION_MAX_RETRIES = 3;
 const USER_PUBLIC_ID_PATTERN =
   /^usr_[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{10}$/;
+const SYSTEM_REPORT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const SYSTEM_REPORT_RATE_LIMIT_MAX = 5;
+const SYSTEM_REPORT_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
 
 type MongoDuplicateKeyError = {
   code?: number;
@@ -74,8 +82,16 @@ type ReportableUser = {
   status?: string | null;
 };
 
+type UploadFile = {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname?: string;
+};
+
 @Injectable()
 export class ReportsService {
+  private readonly logger = new Logger(ReportsService.name);
   constructor(
     @InjectConnection()
     private readonly connection: Connection,
@@ -97,7 +113,95 @@ export class ReportsService {
 
     @InjectModel(Block.name)
     private readonly blockModel: Model<Block>,
+
+    @InjectModel(SystemReport.name)
+    private readonly systemReportModel: Model<SystemReport>,
+
+    private readonly uploadsService: UploadsService,
   ) {}
+
+  async reportIssue(
+    userId: string,
+    dto: ReportIssueDto,
+    files: UploadFile[] = [],
+  ) {
+    const reporterObjectId = this.toObjectId(userId);
+
+    const reporter = await this.userModel
+      .findOne({
+        _id: reporterObjectId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!reporter) {
+      throw new UnauthorizedException('Tài khoản không hợp lệ');
+    }
+
+    const normalizedDescription = this.normalizeSystemReportDescription(
+      dto.description,
+    );
+    const descriptionHash = this.buildSystemReportDescriptionHash(
+      normalizedDescription,
+    );
+    const dedupeKey = this.buildSystemReportDedupeKey(
+      reporterObjectId,
+      descriptionHash,
+    );
+
+    await this.assertSystemReportRateLimit(reporterObjectId);
+    await this.assertNoRecentDuplicateSystemReport(
+      reporterObjectId,
+      descriptionHash,
+    );
+
+    const uploadedImages =
+      await this.uploadsService.uploadSystemReportImages(files);
+
+    try {
+      await this.systemReportModel.create({
+        reporterId: reporterObjectId,
+        description: normalizedDescription,
+        descriptionHash,
+        dedupeKey,
+        evidenceImages: uploadedImages.map((image) => ({
+          url: image.url,
+          publicId: image.publicId,
+        })),
+      });
+    } catch (error) {
+      try {
+        await this.uploadsService.deleteImages(
+          uploadedImages.map((image) => image.publicId),
+        );
+      } catch (cleanupError) {
+        this.logger.error(
+          `Failed to cleanup system report evidence after create failure: ${
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError)
+          }`,
+          cleanupError instanceof Error ? cleanupError.stack : undefined,
+        );
+      }
+
+      if (this.isDuplicateKeyError(error)) {
+        throw new ConflictException(
+          'Bạn đã gửi báo cáo sự cố này gần đây. Vui lòng thử lại sau.',
+        );
+      }
+
+      throw error;
+    }
+
+    return {
+      success: true,
+      message: 'Đã gửi báo cáo sự cố',
+    };
+  }
 
   async reportPost(userId: string, publicId: string, dto: ReportPostDto) {
     const reporterObjectId = this.toObjectId(userId);
@@ -395,6 +499,70 @@ export class ReportsService {
     }
 
     throw lastError;
+  }
+
+  private normalizeSystemReportDescription(description: string): string {
+    return description.trim().replace(/\s+/g, ' ');
+  }
+
+  private buildSystemReportDescriptionHash(description: string): string {
+    return createHash('sha256').update(description).digest('hex');
+  }
+
+  private buildSystemReportDedupeKey(
+    reporterId: Types.ObjectId,
+    descriptionHash: string,
+  ): string {
+    const bucket = Math.floor(Date.now() / SYSTEM_REPORT_DUPLICATE_WINDOW_MS);
+
+    return `system_issue:${reporterId.toString()}:${descriptionHash}:${bucket}`;
+  }
+
+  private async assertSystemReportRateLimit(
+    reporterId: Types.ObjectId,
+  ): Promise<void> {
+    const windowStart = new Date(
+      Date.now() - SYSTEM_REPORT_RATE_LIMIT_WINDOW_MS,
+    );
+
+    const reportCount = await this.systemReportModel
+      .countDocuments({
+        reporterId,
+        createdAt: { $gte: windowStart },
+      })
+      .exec();
+
+    if (reportCount >= SYSTEM_REPORT_RATE_LIMIT_MAX) {
+      throw new HttpException(
+        'Bạn đã gửi quá nhiều báo cáo sự cố. Vui lòng thử lại sau.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  private async assertNoRecentDuplicateSystemReport(
+    reporterId: Types.ObjectId,
+    descriptionHash: string,
+  ): Promise<void> {
+    const duplicateWindowStart = new Date(
+      Date.now() - SYSTEM_REPORT_DUPLICATE_WINDOW_MS,
+    );
+
+    const existingReport = await this.systemReportModel
+      .findOne({
+        reporterId,
+        descriptionHash,
+        createdAt: { $gte: duplicateWindowStart },
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (existingReport) {
+      throw new ConflictException(
+        'Bạn đã gửi báo cáo sự cố này gần đây. Vui lòng thử lại sau.',
+      );
+    }
   }
 
   private async createPostReportWithCooldown({

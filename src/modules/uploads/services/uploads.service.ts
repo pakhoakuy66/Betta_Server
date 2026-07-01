@@ -166,6 +166,44 @@ export class UploadsService {
     }
   }
 
+  async uploadSystemReportImage(file: UploadFile): Promise<UploadedImage> {
+    this.validateImageFile(file);
+
+    const result = await this.uploadBuffer(file.buffer, 'betta/system-reports');
+
+    return {
+      url: result.secure_url,
+      publicId: result.public_id,
+      width: result.width,
+      height: result.height,
+      format: result.format,
+      bytes: result.bytes,
+    };
+  }
+
+  async uploadSystemReportImages(
+    files: UploadFile[] = [],
+  ): Promise<UploadedImage[]> {
+    if (files.length > 3) {
+      throw new BadRequestException(
+        'Báo cáo sự cố chỉ được phép có tối đa 3 ảnh bằng chứng',
+      );
+    }
+
+    const uploadedImages: UploadedImage[] = [];
+
+    try {
+      for (const file of files) {
+        uploadedImages.push(await this.uploadSystemReportImage(file));
+      }
+
+      return uploadedImages;
+    } catch (error) {
+      await this.deleteImages(uploadedImages.map((image) => image.publicId));
+      throw error;
+    }
+  }
+
   private validateImageFile(file: UploadFile): void {
     if (!file?.buffer) {
       throw new BadRequestException('File ảnh không hợp lệ');
