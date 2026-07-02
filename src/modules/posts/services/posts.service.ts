@@ -14,6 +14,7 @@ import {
   UploadsService,
 } from '../../uploads/services/uploads.service';
 import { StreakService } from '../../streak/services/streak.service';
+import { RecapService } from '../../recap/services/recap.service';
 import { CreatePostDto } from '../dto/create-post.dto';
 import {
   generatePostPublicId,
@@ -72,6 +73,7 @@ export class PostsService {
     @InjectModel(Reaction.name)
     private readonly reactionModel: Model<Reaction>,
     private readonly streakService: StreakService,
+    private readonly recapService: RecapService,
   ) {}
 
   async createPost(
@@ -138,6 +140,13 @@ export class PostsService {
         .exec();
 
       await this.streakService.recordPostCreated(userObjectId, postCreatedAt);
+
+      await this.recapService.recordPostCreatedEvent({
+        actorId: userObjectId,
+        postId: createdPost._id,
+        postPublicId: createdPost.publicId,
+        occurredAt: postCreatedAt,
+      });
 
       return {
         success: true,

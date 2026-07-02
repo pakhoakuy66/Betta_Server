@@ -4,6 +4,7 @@ import { PostsService } from './services/posts.service';
 import { PostsController } from './controllers/posts.controller';
 import { UploadsModule } from '../uploads/uploads.module';
 import { StreakModule } from '../streak/streak.module';
+import { RecapModule } from '../recap/recap.module';
 import { Post, PostSchema } from './schemas/post.schema';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import {
@@ -17,6 +18,7 @@ import { Reaction, ReactionSchema } from '../reactions/schemas/reaction.schema';
   imports: [
     UploadsModule,
     StreakModule,
+    RecapModule,
     MongooseModule.forFeature([
       { name: Post.name, schema: PostSchema },
       { name: User.name, schema: UserSchema },

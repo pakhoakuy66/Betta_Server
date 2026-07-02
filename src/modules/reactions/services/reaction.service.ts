@@ -7,6 +7,7 @@ import {
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { NotificationsService } from '../../notifications/services/notifications.service';
+import { RecapService } from '../../recap/services/recap.service';
 import { Post } from '../../posts/schemas/post.schema';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
@@ -46,6 +47,7 @@ export class ReactionService {
     @InjectModel(Block.name)
     private readonly blockModel: Model<Block>,
     private readonly notificationsService: NotificationsService,
+    private readonly recapService: RecapService,
   ) {}
 
   async reactToPost(
@@ -142,7 +144,16 @@ export class ReactionService {
       });
 
       if (createdNewReaction) {
-        void this.notificationsService.createReactionNotification({
+        if (!post.authorId.equals(currentObjectId)) {
+          void this.notificationsService.createReactionNotification({
+            actorId: currentObjectId,
+            postOwnerId: post.authorId,
+            postId: post._id,
+            postPublicId: post.publicId,
+          });
+        }
+
+        void this.recapService.recordReactionCreatedEvent({
           actorId: currentObjectId,
           postOwnerId: post.authorId,
           postId: post._id,
