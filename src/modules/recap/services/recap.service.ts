@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, type PipelineStage } from 'mongoose';
 import {
@@ -34,6 +34,15 @@ type RecordReactionCreatedEventPayload = {
   occurredAt?: Date;
 };
 
+export type WeeklyRecapNotificationTarget = {
+  recapId: Types.ObjectId;
+  recipientId: Types.ObjectId;
+  weekKey: string;
+  weekStart: Date;
+  weekEnd: Date;
+  timezone: string;
+};
+
 type MongoDuplicateKeyError = {
   code?: number;
 };
@@ -41,6 +50,19 @@ type MongoDuplicateKeyError = {
 type AggregateWeeklyRecapOptions = {
   referenceDate?: Date;
   weekStart?: Date;
+};
+
+export type AggregateWeeklyRecapResult = {
+  success: true;
+  data: {
+    weekStart: Date;
+    weekEnd: Date;
+    timezone: string;
+    processed: number;
+    upserted: number;
+    modified: number;
+    matched: number;
+  };
 };
 
 type CountByUserRow = {
@@ -73,6 +95,43 @@ type WeeklyReactionStatsFacetRow = {
   heartsGave: CountByUserRow[];
   topGivers: TopUsersRow[];
   topReceivers: TopUsersRow[];
+};
+
+type RecapUserSummary = {
+  id: string;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+  streakCount: number;
+};
+
+type WeeklyRecapLean = {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  year: number;
+  weekNumber: number;
+  weekKey: string;
+  weekStart: Date;
+  weekEnd: Date;
+  timezone: string;
+  isSeen: boolean;
+  stats: {
+    postsCount: number;
+    heartsGave: number;
+    heartsReceived: number;
+    topGivers: Types.ObjectId[];
+    topReceivers: Types.ObjectId[];
+  };
+};
+
+type RecapUserLean = {
+  _id: Types.ObjectId;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+  streakCount: number;
 };
 
 @Injectable()
@@ -164,7 +223,7 @@ export class RecapService {
   async aggregateWeeklyRecap({
     referenceDate,
     weekStart,
-  }: AggregateWeeklyRecapOptions = {}) {
+  }: AggregateWeeklyRecapOptions = {}): Promise<AggregateWeeklyRecapResult> {
     const range = weekStart
       ? {
           weekStart,
@@ -264,6 +323,125 @@ export class RecapService {
         matched: writeResult.matched,
       },
     };
+  }
+
+  async getLatestRecapForUser(userId: string) {
+    const userObjectId = new Types.ObjectId(userId);
+
+    const recap = await this.weeklyRecapModel
+      .findOne({
+        userId: userObjectId,
+        timezone: RECAP_TIMEZONE,
+      })
+      .sort({ weekStart: -1 })
+      .lean<WeeklyRecapLean>()
+      .exec();
+
+    if (!recap) {
+      return {
+        success: true,
+        data: null,
+      };
+    }
+
+    const usersById = await this.getRecapUsersById([
+      ...recap.stats.topGivers,
+      ...recap.stats.topReceivers,
+    ]);
+
+    return {
+      success: true,
+      data: {
+        id: recap._id.toString(),
+        year: recap.year,
+        weekNumber: recap.weekNumber,
+        weekKey: recap.weekKey,
+        weekStart: recap.weekStart,
+        weekEnd: recap.weekEnd,
+        timezone: recap.timezone,
+        isSeen: recap.isSeen,
+        stats: {
+          postsCount: recap.stats.postsCount,
+          heartsGave: recap.stats.heartsGave,
+          heartsReceived: recap.stats.heartsReceived,
+          topGivers: this.mapRecapUsers(recap.stats.topGivers, usersById),
+          topReceivers: this.mapRecapUsers(recap.stats.topReceivers, usersById),
+        },
+      },
+    };
+  }
+
+  async markRecapAsSeen(userId: string, recapId: string) {
+    if (!Types.ObjectId.isValid(recapId)) {
+      throw new NotFoundException('Recap không tồn tại');
+    }
+
+    const result = await this.weeklyRecapModel
+      .updateOne(
+        {
+          _id: new Types.ObjectId(recapId),
+          userId: new Types.ObjectId(userId),
+        },
+        {
+          $set: {
+            isSeen: true,
+          },
+        },
+      )
+      .exec();
+
+    if (result.matchedCount === 0) {
+      throw new NotFoundException('Recap không tồn tại');
+    }
+
+    return {
+      success: true,
+      message: 'Đã đánh dấu recap là đã xem',
+      data: {
+        modifiedCount: result.modifiedCount,
+      },
+    };
+  }
+
+  async getWeeklyRecapNotificationTargets(
+    weekKey: string,
+  ): Promise<WeeklyRecapNotificationTarget[]> {
+    const recaps = await this.weeklyRecapModel
+      .find({
+        weekKey,
+        timezone: RECAP_TIMEZONE,
+      })
+      .select('_id userId weekKey weekStart weekEnd timezone')
+      .lean<
+        Array<{
+          _id: Types.ObjectId;
+          userId: Types.ObjectId;
+          weekKey: string;
+          weekStart: Date;
+          weekEnd: Date;
+          timezone: string;
+        }>
+      >()
+      .exec();
+
+    if (recaps.length === 0) return [];
+
+    const activeUserIds = new Set(
+      await this.filterActiveUserIds(
+        recaps.map((recap) => recap.userId.toString()),
+      ),
+    );
+
+    return recaps
+      .filter((recap) => activeUserIds.has(recap.userId.toString()))
+      .map((recap) => ({
+        recapId: recap._id,
+        recipientId: recap.userId,
+        weekKey: recap.weekKey,
+        weekStart: recap.weekStart,
+        weekEnd: recap.weekEnd,
+        timezone: recap.timezone,
+      }));
   }
 
   private async getPostsCountMap(
@@ -534,5 +712,51 @@ export class RecapService {
       'code' in error &&
       (error as MongoDuplicateKeyError).code === 11000
     );
+  }
+
+  private async getRecapUsersById(
+    userIds: Types.ObjectId[],
+  ): Promise<Map<string, RecapUserSummary>> {
+    const uniqueUserIds = [
+      ...new Set(userIds.map((userId) => userId.toString())),
+    ];
+
+    if (uniqueUserIds.length === 0) {
+      return new Map();
+    }
+
+    const users = await this.userModel
+      .find({
+        _id: { $in: uniqueUserIds.map((id) => new Types.ObjectId(id)) },
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('publicId username fullname avatar streakCount')
+      .lean<RecapUserLean[]>()
+      .exec();
+
+    return new Map(
+      users.map((user) => [
+        user._id.toString(),
+        {
+          id: user._id.toString(),
+          publicId: user.publicId,
+          username: user.username,
+          fullname: user.fullname,
+          avatar: user.avatar,
+          streakCount: user.streakCount,
+        },
+      ]),
+    );
+  }
+
+  private mapRecapUsers(
+    userIds: Types.ObjectId[],
+    usersById: Map<string, RecapUserSummary>,
+  ): RecapUserSummary[] {
+    return userIds.flatMap((userId) => {
+      const user = usersById.get(userId.toString());
+      return user ? [user] : [];
+    });
   }
 }
