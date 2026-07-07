@@ -26,6 +26,9 @@ export class Post extends Document {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   authorId!: Types.ObjectId;
 
+  @Prop({ type: String, default: null, trim: true })
+  idempotencyKey?: string | null;
+
   // 2. NỘI DUNG: Dạng text (Mục 3.3 SRS)
   @Prop({
     type: String,
@@ -131,3 +134,16 @@ PostSchema.index({
   cleanupLockedUntil: 1,
   expireAt: 1,
 });
+
+PostSchema.index(
+  {
+    authorId: 1,
+    idempotencyKey: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      idempotencyKey: { $type: 'string' },
+    },
+  },
+);

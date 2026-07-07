@@ -13,6 +13,7 @@ import {
 } from '../relationshipModule/schemas/relationship.schema';
 import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 import { Reaction, ReactionSchema } from '../reactions/schemas/reaction.schema';
+import { PostShare, PostShareSchema } from './schemas/post-share.schema';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { Reaction, ReactionSchema } from '../reactions/schemas/reaction.schema';
       { name: Relationship.name, schema: RelationshipSchema },
       { name: Block.name, schema: BlockSchema },
       { name: Reaction.name, schema: ReactionSchema },
+      { name: PostShare.name, schema: PostShareSchema },
     ]),
   ],
   providers: [PostsService],

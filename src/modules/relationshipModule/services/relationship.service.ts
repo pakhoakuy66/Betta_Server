@@ -10,6 +10,8 @@ import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
 import { Block } from '../schemas/block.schema';
 
+const USER_PUBLIC_ID_REGEX = /^usr_[A-Za-z0-9_-]{6,40}$/;
+
 type RelationshipListUser = {
   _id: Types.ObjectId;
   publicId?: string;
@@ -55,17 +57,35 @@ export class RelationshipService {
     });
   }
 
-  async followUser(currentUserId: string, targetUserId: string) {
-    if (currentUserId === targetUserId) {
-      throw new BadRequestException('Bạn không thể tự follow chính mình');
+  private buildUserLookupFilter(
+    identifier: string,
+  ): { _id: Types.ObjectId } | { publicId: string } {
+    if (Types.ObjectId.isValid(identifier)) {
+      return { _id: new Types.ObjectId(identifier) };
     }
 
-    const targetId = new Types.ObjectId(targetUserId);
+    if (USER_PUBLIC_ID_REGEX.test(identifier)) {
+      return { publicId: identifier };
+    }
+
+    throw new BadRequestException('Người dùng không hợp lệ');
+  }
+
+  async followUser(currentUserId: string, targetUserId: string) {
     const followerId = new Types.ObjectId(currentUserId);
+    const targetUserFilter = this.buildUserLookupFilter(targetUserId);
 
     const [currentUser, targetUser] = await Promise.all([
-      this.userModel.findOne({ _id: followerId, isDeleted: false }),
-      this.userModel.findOne({ _id: targetId, isDeleted: false }),
+      this.userModel.findOne({
+        _id: followerId,
+        isDeleted: false,
+        status: 'active',
+      }),
+      this.userModel.findOne({
+        ...targetUserFilter,
+        isDeleted: false,
+        status: 'active',
+      }),
     ]);
 
     if (!currentUser) {
@@ -76,6 +96,12 @@ export class RelationshipService {
 
     if (!targetUser) {
       throw new BadRequestException('Người dùng không tồn tại hoặc đã bị xóa');
+    }
+
+    const targetId = targetUser._id;
+
+    if (targetId.equals(followerId)) {
+      throw new BadRequestException('Bạn không thể tự follow chính mình');
     }
 
     const blockRecord = await this.blockModel.findOne({
@@ -121,8 +147,22 @@ export class RelationshipService {
   }
 
   async unfollowUser(currentUserId: string, targetUserId: string) {
-    const targetId = new Types.ObjectId(targetUserId);
     const followerId = new Types.ObjectId(currentUserId);
+    const targetUserFilter = this.buildUserLookupFilter(targetUserId);
+
+    const targetUser = await this.userModel
+      .findOne({
+        ...targetUserFilter,
+        isDeleted: false,
+      })
+      .select('_id')
+      .exec();
+
+    if (!targetUser) {
+      throw new BadRequestException('Người dùng không tồn tại hoặc đã bị xóa');
+    }
+
+    const targetId = targetUser._id;
 
     const deleted = await this.relationshipModel.findOneAndDelete({
       followerId,
