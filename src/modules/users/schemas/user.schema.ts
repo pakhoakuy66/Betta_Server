@@ -3,6 +3,20 @@ import { Document } from 'mongoose';
 
 export const DEFAULT_AVATAR_ID = 'user_1_bibjpn';
 
+export type NotificationSettings = {
+  enabled: boolean;
+  follow: boolean;
+  reaction: boolean;
+  recap: boolean;
+};
+
+export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  enabled: true,
+  follow: true,
+  reaction: true,
+  recap: true,
+};
+
 export const DEFAULT_AVATAR_URL =
   'https://res.cloudinary.com/dulmj9v6i/image/upload/v1774254440/user_1_bibjpn.jpg';
 
@@ -118,6 +132,19 @@ export class User extends Document {
   // Feild đếm số lần nhập sai OTP
   @Prop({ type: Number, default: 0, select: false })
   forgotPasswordAttempts?: number;
+
+  // Notifications off/on
+  @Prop({
+    type: {
+      enabled: { type: Boolean, default: true },
+      follow: { type: Boolean, default: true },
+      reaction: { type: Boolean, default: true },
+      recap: { type: Boolean, default: true },
+    },
+    default: DEFAULT_NOTIFICATION_SETTINGS,
+    _id: false,
+  })
+  notificationSettings!: NotificationSettings;
 
   // Xử lý Refresh Token (Chuẩn Doanh Nghiệp)
   @Prop({ type: String, default: null, select: false })

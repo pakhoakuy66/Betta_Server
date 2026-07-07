@@ -22,8 +22,10 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { UsersService } from '../services/users.service';
 import {
   SearchUsersQueryDto,
+  SuggestUsersQueryDto,
   UpdateProfileDto,
   DeleteMyAccountDto,
+  UpdateNotificationSettingsDto,
 } from '../dto/users.dto';
 import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
 import type {
@@ -52,6 +54,36 @@ export class UsersController {
     @Query() query: SearchUsersQueryDto,
   ) {
     return this.usersService.searchUsers(req.user._id, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Lấy danh sách user gợi ý để follow' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get('suggestions')
+  async suggestUsers(
+    @Request() req: AuthenticatedRequest,
+    @Query() query: SuggestUsersQueryDto,
+  ) {
+    return this.usersService.suggestUsers(req.user._id, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Lấy cài đặt thông báo của user hiện tại' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get('me/notification-settings')
+  getMyNotificationSettings(@Request() req: AuthenticatedRequest) {
+    return this.usersService.getMyNotificationSettings(req.user._id);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Cập nhật cài đặt thông báo của user hiện tại' })
+  @UseGuards(AuthGuard('jwt'))
+  @Patch('me/notification-settings')
+  updateMyNotificationSettings(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateNotificationSettingsDto,
+  ) {
+    return this.usersService.updateMyNotificationSettings(req.user._id, dto);
   }
 
   @ApiOperation({ summary: 'Lấy thông tin cá nhân của người dùng bất kỳ' })

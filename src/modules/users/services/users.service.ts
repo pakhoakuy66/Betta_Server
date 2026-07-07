@@ -7,18 +7,39 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, Model, Types, type ClientSession } from 'mongoose';
+import {
+  Connection,
+  Model,
+  Types,
+  type ClientSession,
+  type PipelineStage,
+} from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import {
   DEFAULT_AVATAR_ID,
   DEFAULT_AVATAR_URL,
+  DEFAULT_NOTIFICATION_SETTINGS,
   User,
+  type NotificationSettings,
 } from '../schemas/user.schema';
-import { SearchUsersQueryDto, UpdateProfileDto } from '../dto/users.dto';
+import {
+  SearchUsersQueryDto,
+  SuggestUsersQueryDto,
+  UpdateNotificationSettingsDto,
+  UpdateProfileDto,
+} from '../dto/users.dto';
 import { UserProfileResponse } from '../interfaces/users.interface';
+import { UploadsService } from '../../uploads/services/uploads.service';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
-import { UploadsService } from '../../uploads/services/uploads.service';
+import { Post } from '../../posts/schemas/post.schema';
+import { Reaction } from '../../reactions/schemas/reaction.schema';
+import { PostShare } from '../../posts/schemas/post-share.schema';
+import { Notification } from '../../notifications/schemas/notifications.schema';
+import { EngagementEvent } from '../../recap/schemas/engagement-event.schema';
+import { WeeklyRecap } from '../../recap/schemas/recap.schema';
+import { StreakHistory } from '../../streak/schemas/streak.schema';
+import { ReportCooldown } from '../../reports/schemas/report-cooldown.schema';
 
 const DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES = 3;
 const TRANSIENT_TRANSACTION_ERROR_LABEL = 'TransientTransactionError';
@@ -39,6 +60,56 @@ type CountResult = {
   total: number;
 };
 
+type SuggestedUserResult = {
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+  bio: string;
+  streakCount: number;
+  followersCount: number;
+};
+
+type SuggestedUserResponse = {
+  id: string;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+  bio: string;
+  streakCount: number;
+  followersCount: number;
+};
+
+type SuggestUsersResponse = {
+  success: true;
+  data: SuggestedUserResponse[];
+  meta: {
+    limit: number;
+    count: number;
+  };
+};
+
+type AccountCleanupAssets = {
+  avatarPublicId: string | null;
+  postImagePublicIds: string[];
+};
+
+type UserPostAsset = {
+  _id: Types.ObjectId;
+  images?: {
+    publicId?: string;
+  }[];
+};
+
+type UserReactionPost = {
+  postId: Types.ObjectId;
+};
+
+type UserWeeklyRecap = {
+  _id: Types.ObjectId;
+};
+
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
@@ -48,6 +119,22 @@ export class UsersService {
     @InjectModel(Relationship.name)
     private readonly relationshipModel: Model<Relationship>,
     @InjectModel(Block.name) private readonly blockModel: Model<Block>,
+    @InjectModel(Post.name)
+    private readonly postModel: Model<Post>,
+    @InjectModel(Reaction.name)
+    private readonly reactionModel: Model<Reaction>,
+    @InjectModel(PostShare.name)
+    private readonly postShareModel: Model<PostShare>,
+    @InjectModel(Notification.name)
+    private readonly notificationModel: Model<Notification>,
+    @InjectModel(EngagementEvent.name)
+    private readonly engagementEventModel: Model<EngagementEvent>,
+    @InjectModel(WeeklyRecap.name)
+    private readonly weeklyRecapModel: Model<WeeklyRecap>,
+    @InjectModel(StreakHistory.name)
+    private readonly streakHistoryModel: Model<StreakHistory>,
+    @InjectModel(ReportCooldown.name)
+    private readonly reportCooldownModel: Model<ReportCooldown>,
     private readonly uploadsService: UploadsService,
   ) {}
 
@@ -189,6 +276,85 @@ export class UsersService {
     };
   }
 
+  async suggestUsers(
+    currentUserId: string,
+    query: SuggestUsersQueryDto,
+  ): Promise<SuggestUsersResponse> {
+    if (!Types.ObjectId.isValid(currentUserId)) {
+      throw new BadRequestException('User ID không hợp lệ');
+    }
+
+    const currentObjectId = new Types.ObjectId(currentUserId);
+    const limit = query.limit ?? 10;
+    const excludePublicIds = query.excludePublicIds ?? [];
+
+    const currentUser = await this.userModel
+      .findOne({
+        _id: currentObjectId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!currentUser) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    const excludedObjectIds =
+      await this.getExcludedUserObjectIdsForSuggestions(currentObjectId);
+
+    const matchStage: PipelineStage.Match['$match'] = {
+      _id: { $nin: excludedObjectIds },
+      isDeleted: false,
+      status: 'active',
+    };
+
+    if (excludePublicIds.length > 0) {
+      matchStage.publicId = { $nin: excludePublicIds };
+    }
+
+    const pipeline: PipelineStage[] = [
+      { $match: matchStage },
+      { $sample: { size: limit } },
+      {
+        $project: {
+          _id: 0,
+          publicId: 1,
+          username: 1,
+          fullname: 1,
+          avatar: 1,
+          bio: 1,
+          streakCount: 1,
+          followersCount: 1,
+        },
+      },
+    ];
+
+    const users = await this.userModel
+      .aggregate<SuggestedUserResult>(pipeline)
+      .exec();
+
+    return {
+      success: true,
+      data: users.map((user) => ({
+        id: user.publicId,
+        publicId: user.publicId,
+        username: user.username,
+        fullname: user.fullname,
+        avatar: user.avatar,
+        bio: user.bio,
+        streakCount: user.streakCount,
+        followersCount: user.followersCount,
+      })),
+      meta: {
+        limit,
+        count: users.length,
+      },
+    };
+  }
+
   // Lấy Profile theo Username (Dành cho việc người khác vào xem tường nhà)
   async getProfileByUsername(
     username: string,
@@ -197,7 +363,7 @@ export class UsersService {
     const user = await this.userModel
       .findOne({ username, isDeleted: false })
       .select(
-        '-password -forgotPasswordOtp -forgotPasswordExpiry -refreshToken -isDeleted -deletedAt',
+        '-password -forgotPasswordOtp -forgotPasswordExpiry -refreshToken -isDeleted -deletedAt -notificationSettings',
       ) // Ẩn triệt để thông tin mật
       .lean()
       .exec();
@@ -498,6 +664,85 @@ export class UsersService {
     };
   }
 
+  private normalizeNotificationSettings(
+    settings?: Partial<NotificationSettings> | null,
+  ): NotificationSettings {
+    return {
+      ...DEFAULT_NOTIFICATION_SETTINGS,
+      ...(settings ?? {}),
+    };
+  }
+
+  async getMyNotificationSettings(userId: string) {
+    const user = await this.userModel
+      .findOne({
+        _id: userId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('notificationSettings')
+      .lean<{ notificationSettings?: Partial<NotificationSettings> }>()
+      .exec();
+
+    if (!user) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    return {
+      success: true,
+      data: this.normalizeNotificationSettings(user.notificationSettings),
+    };
+  }
+
+  async updateMyNotificationSettings(
+    userId: string,
+    dto: UpdateNotificationSettingsDto,
+  ) {
+    const updateFields: Record<string, boolean> = {};
+
+    (['enabled', 'follow', 'reaction', 'recap'] as const).forEach((key) => {
+      if (typeof dto[key] === 'boolean') {
+        updateFields[`notificationSettings.${key}`] = dto[key];
+      }
+    });
+
+    if (Object.keys(updateFields).length === 0) {
+      throw new BadRequestException(
+        'Không có cài đặt thông báo nào để cập nhật',
+      );
+    }
+
+    const user = await this.userModel
+      .findOneAndUpdate(
+        {
+          _id: userId,
+          isDeleted: false,
+          status: 'active',
+        },
+        {
+          $set: updateFields,
+        },
+        {
+          new: true,
+          projection: {
+            notificationSettings: 1,
+          },
+        },
+      )
+      .lean<{ notificationSettings?: Partial<NotificationSettings> }>()
+      .exec();
+
+    if (!user) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    return {
+      success: true,
+      message: 'Đã cập nhật cài đặt thông báo',
+      data: this.normalizeNotificationSettings(user.notificationSettings),
+    };
+  }
+
   // Trong UsersService (Chuyển đổi trạng thái thay vì xóa hẳn)
   async softDeleteUser(userId: string, currentPassword: string) {
     if (!Types.ObjectId.isValid(userId)) {
@@ -536,8 +781,53 @@ export class UsersService {
       throw new UnauthorizedException('Mật khẩu không chính xác');
     }
 
+    const cleanupAssets: AccountCleanupAssets = {
+      avatarPublicId:
+        user.avatarId && user.avatarId !== DEFAULT_AVATAR_ID
+          ? user.avatarId
+          : null,
+      postImagePublicIds: [],
+    };
+
     await this.runInTransaction(async (session) => {
       const now = new Date();
+
+      const userPosts = await this.postModel
+        .find({ authorId: uid })
+        .select('_id images')
+        .session(session)
+        .lean<UserPostAsset[]>()
+        .exec();
+
+      const postIds = userPosts.map((post) => post._id);
+
+      cleanupAssets.postImagePublicIds =
+        this.collectPostImagePublicIds(userPosts);
+
+      const userReactionPosts = await this.reactionModel
+        .find({
+          userId: uid,
+          ...(postIds.length > 0 ? { postId: { $nin: postIds } } : {}),
+        })
+        .select('postId')
+        .session(session)
+        .lean<UserReactionPost[]>()
+        .exec();
+
+      const reactedPostIds = [
+        ...new Set(
+          userReactionPosts.map((reaction) => reaction.postId.toString()),
+        ),
+      ].map((postId) => new Types.ObjectId(postId));
+
+      const userWeeklyRecaps = await this.weeklyRecapModel
+        .find({ userId: uid })
+        .select('_id')
+        .session(session)
+        .lean<UserWeeklyRecap[]>()
+        .exec();
+
+      const userWeeklyRecapIds = userWeeklyRecaps.map((recap) => recap._id);
 
       const claimResult = await this.userModel
         .updateOne(
@@ -553,6 +843,11 @@ export class UsersService {
               refreshToken: null,
               followersCount: 0,
               followingCount: 0,
+              postsCount: 0,
+              avatarId: DEFAULT_AVATAR_ID,
+              avatar: DEFAULT_AVATAR_URL,
+              bio: '',
+              link: '',
             },
             $unset: {
               forgotPasswordOtp: '',
@@ -604,6 +899,107 @@ export class UsersService {
         .session(session)
         .exec();
 
+      await this.postModel
+        .deleteMany({ authorId: uid })
+        .session(session)
+        .exec();
+
+      await this.reactionModel
+        .deleteMany({
+          $or: [
+            { userId: uid },
+            { postOwnerId: uid },
+            ...(postIds.length > 0 ? [{ postId: { $in: postIds } }] : []),
+          ],
+        })
+        .session(session)
+        .exec();
+
+      if (reactedPostIds.length > 0) {
+        await this.postModel
+          .updateMany(
+            {
+              _id: { $in: reactedPostIds },
+              likeCount: { $gt: 0 },
+            },
+            { $inc: { likeCount: -1 } },
+          )
+          .session(session)
+          .exec();
+      }
+
+      await this.postShareModel
+        .deleteMany({
+          $or: [
+            { userId: uid },
+            ...(postIds.length > 0 ? [{ postId: { $in: postIds } }] : []),
+          ],
+        })
+        .session(session)
+        .exec();
+
+      await this.notificationModel
+        .deleteMany({
+          $or: [
+            { recipientId: uid },
+            { actorIds: uid },
+            { countedActorIds: uid },
+            ...(postIds.length > 0 ? [{ targetId: { $in: postIds } }] : []),
+            ...(userWeeklyRecapIds.length > 0
+              ? [{ targetId: { $in: userWeeklyRecapIds } }]
+              : []),
+          ],
+        })
+        .session(session)
+        .exec();
+
+      await this.engagementEventModel
+        .deleteMany({
+          $or: [
+            { actorId: uid },
+            { postOwnerId: uid },
+            ...(postIds.length > 0 ? [{ postId: { $in: postIds } }] : []),
+          ],
+        })
+        .session(session)
+        .exec();
+
+      await this.weeklyRecapModel
+        .deleteMany({ userId: uid })
+        .session(session)
+        .exec();
+
+      await this.weeklyRecapModel
+        .updateMany(
+          {
+            $or: [{ 'stats.topGivers': uid }, { 'stats.topReceivers': uid }],
+          },
+          {
+            $pull: {
+              'stats.topGivers': uid,
+              'stats.topReceivers': uid,
+            },
+          },
+        )
+        .session(session)
+        .exec();
+
+      await this.streakHistoryModel
+        .deleteMany({ userId: uid })
+        .session(session)
+        .exec();
+
+      await this.reportCooldownModel
+        .deleteMany({
+          $or: [
+            { reporterId: uid },
+            { targetId: uid },
+            ...(postIds.length > 0 ? [{ targetId: { $in: postIds } }] : []),
+          ],
+        })
+        .session(session)
+        .exec();
+
       if (followingIds.length > 0) {
         await this.userModel
           .updateMany(
@@ -630,6 +1026,8 @@ export class UsersService {
           .exec();
       }
     });
+
+    void this.cleanupDeletedAccountAssets(cleanupAssets);
 
     return {
       success: true,
@@ -673,5 +1071,78 @@ export class UsersService {
     ]);
 
     return result[0]?.total ?? 0;
+  }
+
+  private async getExcludedUserObjectIdsForSuggestions(
+    currentObjectId: Types.ObjectId,
+  ): Promise<Types.ObjectId[]> {
+    const [relationships, blocks] = await Promise.all([
+      this.relationshipModel
+        .find({ followerId: currentObjectId })
+        .select('followingId')
+        .lean()
+        .exec(),
+
+      this.blockModel
+        .find({
+          $or: [{ blockerId: currentObjectId }, { blockedId: currentObjectId }],
+        })
+        .select('blockerId blockedId')
+        .lean()
+        .exec(),
+    ]);
+
+    const currentUserId = currentObjectId.toString();
+    const excludedIds = new Set<string>([currentUserId]);
+
+    relationships.forEach((relationship) => {
+      excludedIds.add(relationship.followingId.toString());
+    });
+
+    blocks.forEach((block) => {
+      const blockerId = block.blockerId.toString();
+      const blockedId = block.blockedId.toString();
+
+      excludedIds.add(blockerId === currentUserId ? blockedId : blockerId);
+    });
+
+    return [...excludedIds].map((id) => new Types.ObjectId(id));
+  }
+
+  // Cleanup assets
+  private collectPostImagePublicIds(posts: UserPostAsset[]): string[] {
+    return [
+      ...new Set(
+        posts.flatMap((post) =>
+          (post.images ?? [])
+            .map((image) => image.publicId)
+            .filter(
+              (publicId): publicId is string =>
+                typeof publicId === 'string' && publicId.trim().length > 0,
+            ),
+        ),
+      ),
+    ];
+  }
+
+  private async cleanupDeletedAccountAssets(
+    assets: AccountCleanupAssets,
+  ): Promise<void> {
+    const publicIds = [...assets.postImagePublicIds];
+
+    if (assets.avatarPublicId && assets.avatarPublicId !== DEFAULT_AVATAR_ID) {
+      publicIds.push(assets.avatarPublicId);
+    }
+
+    if (publicIds.length === 0) return;
+
+    try {
+      await this.uploadsService.deleteImages(publicIds);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Failed to cleanup deleted account assets: ${this.getErrorMessage(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 }

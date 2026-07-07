@@ -16,7 +16,11 @@ import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { MailService } from './mail.service';
 import { generateUserPublicId } from '../../users/utils/generate-public-id';
-import { DEFAULT_AVATAR_ID, User } from '../../users/schemas/user.schema';
+import {
+  DEFAULT_AVATAR_ID,
+  DEFAULT_NOTIFICATION_SETTINGS,
+  User,
+} from '../../users/schemas/user.schema';
 import {
   RegisterDto,
   LoginDto,
@@ -131,6 +135,10 @@ export class AuthService {
       hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
       streakCount: user.streakCount ?? 0,
       status: user.status ?? 'active',
+      notificationSettings: {
+        ...DEFAULT_NOTIFICATION_SETTINGS,
+        ...(user.notificationSettings ?? {}),
+      },
     };
   }
 
