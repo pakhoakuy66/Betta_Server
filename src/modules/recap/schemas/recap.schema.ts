@@ -69,3 +69,4 @@ WeeklyRecapSchema.index(
 
 WeeklyRecapSchema.index({ userId: 1, weekStart: -1 });
 WeeklyRecapSchema.index({ weekStart: 1, weekEnd: 1 });
+WeeklyRecapSchema.index({ weekEnd: 1 });

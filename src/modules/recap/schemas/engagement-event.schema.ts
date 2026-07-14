@@ -57,3 +57,8 @@ EngagementEventSchema.index({ actorId: 1, weekStart: 1 });
 EngagementEventSchema.index({ postId: 1, weekStart: 1 });
 EngagementEventSchema.index({ type: 1, occurredAt: 1 });
 EngagementEventSchema.index({ type: 1, postId: 1, weekStart: 1 });
+EngagementEventSchema.index({
+  timezone: 1,
+  weekStart: 1,
+});
+EngagementEventSchema.index({ weekEnd: 1, timezone: 1, weekStart: 1 });

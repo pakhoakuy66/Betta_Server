@@ -736,7 +736,7 @@ export class NotificationsService {
       actors.map((actor) => [
         actor._id.toString(),
         {
-          id: actor._id.toString(),
+          id: actor.publicId,
           publicId: actor.publicId,
           username: actor.username,
           fullname: actor.fullname,

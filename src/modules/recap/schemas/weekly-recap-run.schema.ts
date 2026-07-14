@@ -89,4 +89,10 @@ export const WeeklyRecapRunSchema =
 
 WeeklyRecapRunSchema.index({ weekKey: 1, timezone: 1 }, { unique: true });
 WeeklyRecapRunSchema.index({ status: 1, lockedUntil: 1 });
+WeeklyRecapRunSchema.index({
+  timezone: 1,
+  weekStart: 1,
+  status: 1,
+});
 WeeklyRecapRunSchema.index({ weekStart: 1, status: 1 });
+WeeklyRecapRunSchema.index({ status: 1, weekEnd: 1 });

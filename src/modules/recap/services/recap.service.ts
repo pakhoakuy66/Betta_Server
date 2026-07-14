@@ -739,7 +739,7 @@ export class RecapService {
       users.map((user) => [
         user._id.toString(),
         {
-          id: user._id.toString(),
+          id: user.publicId,
           publicId: user.publicId,
           username: user.username,
           fullname: user.fullname,
