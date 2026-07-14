@@ -1,18 +1,23 @@
 import {
-  Injectable,
   BadRequestException,
   ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { ClientSession, Connection, Model, Types } from 'mongoose';
+import { acquireSocialGraphPairLock } from '../utils/social-graph-lock.util';
 import { NotificationsService } from '../../notifications/services/notifications.service';
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
 import { Block } from '../schemas/block.schema';
 
+const USER_PUBLIC_ID_REGEX = /^usr_[A-Za-z0-9_-]{6,40}$/;
+
 type RelationshipListUser = {
   _id: Types.ObjectId;
-  publicId?: string;
+  publicId: string;
   username: string;
   fullname: string;
   avatar?: string;
@@ -24,13 +29,27 @@ type CountResult = {
   total: number;
 };
 
+type MongoDuplicateKeyError = {
+  code?: number;
+};
+
 @Injectable()
 export class RelationshipService {
+  private readonly logger = new Logger(RelationshipService.name);
+
   constructor(
+    @InjectConnection()
+    private readonly connection: Connection,
+
     @InjectModel(Relationship.name)
-    private relationshipModel: Model<Relationship>,
-    @InjectModel(User.name) private userModel: Model<User>,
-    @InjectModel(Block.name) private blockModel: Model<Block>,
+    private readonly relationshipModel: Model<Relationship>,
+
+    @InjectModel(User.name)
+    private readonly userModel: Model<User>,
+
+    @InjectModel(Block.name)
+    private readonly blockModel: Model<Block>,
+
     private readonly notificationsService: NotificationsService,
   ) {}
 
@@ -55,96 +74,311 @@ export class RelationshipService {
     });
   }
 
-  async followUser(currentUserId: string, targetUserId: string) {
-    if (currentUserId === targetUserId) {
-      throw new BadRequestException('Bạn không thể tự follow chính mình');
+  private buildUserLookupFilter(
+    identifier: string,
+  ): { _id: Types.ObjectId } | { publicId: string } {
+    if (Types.ObjectId.isValid(identifier)) {
+      return { _id: new Types.ObjectId(identifier) };
     }
 
-    const targetId = new Types.ObjectId(targetUserId);
-    const followerId = new Types.ObjectId(currentUserId);
-
-    const [currentUser, targetUser] = await Promise.all([
-      this.userModel.findOne({ _id: followerId, isDeleted: false }),
-      this.userModel.findOne({ _id: targetId, isDeleted: false }),
-    ]);
-
-    if (!currentUser) {
-      throw new BadRequestException(
-        'Tài khoản hiện tại không tồn tại hoặc đã bị xóa',
-      );
+    if (USER_PUBLIC_ID_REGEX.test(identifier)) {
+      return { publicId: identifier };
     }
 
-    if (!targetUser) {
+    throw new BadRequestException('Người dùng không hợp lệ');
+  }
+
+  private async resolveActiveUserObjectId(
+    identifier: string,
+  ): Promise<Types.ObjectId> {
+    const user = await this.userModel
+      .findOne({
+        ...this.buildUserLookupFilter(identifier),
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!user) {
       throw new BadRequestException('Người dùng không tồn tại hoặc đã bị xóa');
     }
 
-    const blockRecord = await this.blockModel.findOne({
-      $or: [
-        { blockerId: followerId, blockedId: targetId },
-        { blockerId: targetId, blockedId: followerId },
+    return user._id;
+  }
+
+  private toCurrentUserObjectId(value: string): Types.ObjectId {
+    if (!Types.ObjectId.isValid(value)) {
+      throw new BadRequestException('Tài khoản hiện tại không hợp lệ');
+    }
+
+    return new Types.ObjectId(value);
+  }
+
+  private isDuplicateKeyError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as MongoDuplicateKeyError).code === 11000
+    );
+  }
+
+  private async decrementCounter(
+    userId: Types.ObjectId,
+    field: 'followersCount' | 'followingCount',
+    session: ClientSession,
+  ): Promise<void> {
+    const result = await this.userModel.updateOne(
+      {
+        _id: userId,
+        isDeleted: false,
+      },
+      [
+        {
+          $set: {
+            [field]: {
+              $max: [
+                0,
+                {
+                  $subtract: [{ $ifNull: [`$${field}`, 0] }, 1],
+                },
+              ],
+            },
+          },
+        },
       ],
-    });
-    if (blockRecord) {
-      throw new BadRequestException(
-        'Không thể theo dõi người dùng đang bị chặn hoặc đã chặn bạn',
+      {
+        session,
+        updatePipeline: true,
+      },
+    );
+
+    if (result.matchedCount !== 1) {
+      throw new ConflictException(
+        'Không thể cập nhật quan hệ người dùng lúc này',
       );
     }
+  }
 
-    // Kiểm tra đã follow chưa
-    const existing = await this.relationshipModel.findOne({
-      followerId,
-      followingId: targetId,
-    });
-    if (existing) {
-      throw new ConflictException('Bạn đã theo dõi người này rồi');
+  async followUser(currentUserId: string, targetUserId: string) {
+    const followerId = this.toCurrentUserObjectId(currentUserId);
+    const targetFilter = this.buildUserLookupFilter(targetUserId);
+
+    const target = await this.userModel
+      .findOne({
+        ...targetFilter,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!target) {
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    // 1. Tạo bản ghi quan hệ
-    await this.relationshipModel.create({ followerId, followingId: targetId });
+    const targetId = target._id;
 
-    // 2. Tăng bộ đếm cho cả 2 bên cùng lúc (Atomic Operation)
-    await Promise.all([
-      this.userModel.findByIdAndUpdate(followerId, {
-        $inc: { followingCount: 1 },
-      }), // Tăng số người mình đang theo dõi
-      this.userModel.findByIdAndUpdate(targetId, {
-        $inc: { followersCount: 1 },
-      }), // Tăng số fan cho Idol
-    ]);
+    if (targetId.equals(followerId)) {
+      throw new BadRequestException('Bạn không thể tự follow chính mình');
+    }
 
-    void this.notificationsService.createFollowNotification({
-      followerId,
-      targetUserId: targetId,
-    });
+    const session = await this.connection.startSession();
 
-    return { success: true, message: 'Đã theo dõi thành công' };
+    try {
+      await session.withTransaction(async () => {
+        await acquireSocialGraphPairLock(
+          this.userModel,
+          followerId,
+          targetId,
+          session,
+        );
+
+        const currentUserExists = await this.userModel
+          .exists({
+            _id: followerId,
+            isDeleted: false,
+            status: 'active',
+          })
+          .session(session);
+
+        if (!currentUserExists) {
+          throw new BadRequestException(
+            'Tài khoản hiện tại không thể thực hiện thao tác này',
+          );
+        }
+
+        const targetExists = await this.userModel
+          .exists({
+            _id: targetId,
+            isDeleted: false,
+            status: 'active',
+          })
+          .session(session);
+
+        if (!targetExists) {
+          throw new NotFoundException('Người dùng không tồn tại');
+        }
+
+        const blocked = await this.blockModel
+          .exists({
+            $or: [
+              { blockerId: followerId, blockedId: targetId },
+              { blockerId: targetId, blockedId: followerId },
+            ],
+          })
+          .session(session);
+
+        if (blocked) {
+          throw new NotFoundException('Người dùng không tồn tại');
+        }
+
+        const existingRelationship = await this.relationshipModel
+          .exists({
+            followerId,
+            followingId: targetId,
+          })
+          .session(session);
+
+        if (existingRelationship) {
+          throw new ConflictException('Bạn đã theo dõi người này rồi');
+        }
+
+        await this.relationshipModel.create(
+          [{ followerId, followingId: targetId }],
+          { session },
+        );
+
+        const followerUpdate = await this.userModel.updateOne(
+          {
+            _id: followerId,
+            isDeleted: false,
+            status: 'active',
+          },
+          { $inc: { followingCount: 1 } },
+          { session },
+        );
+
+        if (followerUpdate.matchedCount !== 1) {
+          throw new ConflictException(
+            'Không thể cập nhật trạng thái theo dõi lúc này',
+          );
+        }
+
+        const targetUpdate = await this.userModel.updateOne(
+          {
+            _id: targetId,
+            isDeleted: false,
+            status: 'active',
+          },
+          { $inc: { followersCount: 1 } },
+          { session },
+        );
+
+        if (targetUpdate.matchedCount !== 1) {
+          throw new ConflictException(
+            'Không thể cập nhật trạng thái theo dõi lúc này',
+          );
+        }
+      });
+
+      void this.notificationsService
+        .createFollowNotification({
+          followerId,
+          targetUserId: targetId,
+        })
+        .catch((error: unknown) => {
+          this.logger.error(
+            `Không thể tạo notification follow. follower=${followerId.toString()}, target=${targetId.toString()}`,
+            error instanceof Error ? error.stack : undefined,
+          );
+        });
+
+      return {
+        success: true,
+        message: 'Đã theo dõi thành công',
+      };
+    } catch (error: unknown) {
+      if (this.isDuplicateKeyError(error)) {
+        throw new ConflictException('Bạn đã theo dõi người này rồi');
+      }
+
+      throw error;
+    } finally {
+      await session.endSession();
+    }
   }
 
   async unfollowUser(currentUserId: string, targetUserId: string) {
-    const targetId = new Types.ObjectId(targetUserId);
-    const followerId = new Types.ObjectId(currentUserId);
+    const followerId = this.toCurrentUserObjectId(currentUserId);
+    const targetFilter = this.buildUserLookupFilter(targetUserId);
 
-    const deleted = await this.relationshipModel.findOneAndDelete({
-      followerId,
-      followingId: targetId,
-    });
-    if (!deleted) {
-      throw new BadRequestException('Bạn chưa theo dõi người này');
+    const target = await this.userModel
+      .findOne({
+        ...targetFilter,
+        isDeleted: false,
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!target) {
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    // Giảm bộ đếm (Atomic Operation)
-    await Promise.all([
-      this.userModel.updateOne(
-        { _id: followerId, isDeleted: false, followingCount: { $gt: 0 } },
-        { $inc: { followingCount: -1 } },
-      ),
-      this.userModel.updateOne(
-        { _id: targetId, isDeleted: false, followersCount: { $gt: 0 } },
-        { $inc: { followersCount: -1 } },
-      ),
-    ]);
+    const targetId = target._id;
+    const session = await this.connection.startSession();
 
-    return { success: true, message: 'Đã bỏ theo dõi thành công' };
+    try {
+      await session.withTransaction(async () => {
+        await acquireSocialGraphPairLock(
+          this.userModel,
+          followerId,
+          targetId,
+          session,
+        );
+
+        const currentUserExists = await this.userModel
+          .exists({
+            _id: followerId,
+            isDeleted: false,
+            status: 'active',
+          })
+          .session(session);
+
+        if (!currentUserExists) {
+          throw new BadRequestException(
+            'Tài khoản hiện tại không thể thực hiện thao tác này',
+          );
+        }
+
+        const deletedRelationship =
+          await this.relationshipModel.findOneAndDelete(
+            {
+              followerId,
+              followingId: targetId,
+            },
+            { session },
+          );
+
+        if (!deletedRelationship) {
+          throw new BadRequestException('Bạn chưa theo dõi người này');
+        }
+
+        await this.decrementCounter(followerId, 'followingCount', session);
+
+        await this.decrementCounter(targetId, 'followersCount', session);
+      });
+
+      return {
+        success: true,
+        message: 'Đã bỏ theo dõi thành công',
+      };
+    } finally {
+      await session.endSession();
+    }
   }
 
   // Lấy danh sách Người theo dõi (Followers)
@@ -155,7 +389,7 @@ export class RelationshipService {
     limit: number = 20,
   ) {
     const skip = (page - 1) * limit;
-    const targetUserId = new Types.ObjectId(userId);
+    const targetUserId = await this.resolveActiveUserObjectId(userId);
     const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
     const activeFollowerStages = [
@@ -220,7 +454,7 @@ export class RelationshipService {
       const targetId = user._id.toString();
 
       return {
-        id: targetId,
+        id: user.publicId,
         publicId: user.publicId,
         username: user.username,
         fullname: user.fullname,
@@ -252,7 +486,7 @@ export class RelationshipService {
     limit: number = 20,
   ) {
     const skip = (page - 1) * limit;
-    const targetUserId = new Types.ObjectId(userId);
+    const targetUserId = await this.resolveActiveUserObjectId(userId);
     const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
     const activeFollowingStages = [
@@ -317,7 +551,7 @@ export class RelationshipService {
       const targetId = user._id.toString();
 
       return {
-        id: targetId,
+        id: user.publicId,
         publicId: user.publicId,
         username: user.username,
         fullname: user.fullname,

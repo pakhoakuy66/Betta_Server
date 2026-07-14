@@ -10,6 +10,8 @@ import {
   UploadedFiles,
   UseGuards,
   UseInterceptors,
+  Headers,
+  HttpCode,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -58,8 +60,14 @@ export class PostsController {
     @Request() req: AuthenticatedRequest,
     @Body() createPostDto: CreatePostDto,
     @UploadedFiles() files: UploadFile[] = [],
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.postsService.createPost(req.user._id, createPostDto, files);
+    return this.postsService.createPost(
+      req.user._id,
+      createPostDto,
+      files,
+      idempotencyKey,
+    );
   }
 
   @ApiBearerAuth('access-token')
@@ -87,6 +95,18 @@ export class PostsController {
     @Query() query: ProfilePostsQueryDto,
   ) {
     return this.postsService.getProfilePosts(req.user._id, username, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Ghi nhận lượt chia sẻ/copy link bài viết' })
+  @UseGuards(AuthGuard('jwt'))
+  @HttpCode(200)
+  @Post(':publicId/share')
+  async recordPostShare(
+    @Request() req: AuthenticatedRequest,
+    @Param('publicId') publicId: string,
+  ) {
+    return this.postsService.recordPostShare(req.user._id, publicId);
   }
 
   @ApiBearerAuth('access-token')

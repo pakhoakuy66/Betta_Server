@@ -34,3 +34,4 @@ export const StreakHistorySchema = SchemaFactory.createForClass(StreakHistory);
 
 // Ràng buộc: Một người dùng chỉ có duy nhất 1 bản ghi lịch sử cho 1 ngày
 StreakHistorySchema.index({ userId: 1, date: 1 }, { unique: true });
+StreakHistorySchema.index({ createdAt: 1 });

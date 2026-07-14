@@ -1,9 +1,11 @@
-// src/modules/auth/strategies/jwt.strategy.ts
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
 import type { JwtRequestUser } from '../../../common/types/authenticated-request';
+import { User } from '../../users/schemas/user.schema';
 
 type JwtPayload = {
   sub: string;
@@ -11,21 +13,26 @@ type JwtPayload = {
   username?: string;
 };
 
+type JwtUserLookup = {
+  _id: Types.ObjectId;
+  email?: string;
+  username?: string;
+};
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(configService: ConfigService) {
-    // 1. Lấy giá trị từ ConfigService
+  constructor(
+    configService: ConfigService,
+    @InjectModel(User.name) private readonly userModel: Model<User>,
+  ) {
     const jwtSecret = configService.get<string>('JWT_SECRET');
 
-    // 2. KIỂM TRA CHUẨN DOANH NGHIỆP:
-    // Nếu thiếu secret, ứng dụng phải báo lỗi ngay lập tức.
     if (!jwtSecret) {
       throw new Error(
         'CRITICAL ERROR: JWT_SECRET is not defined in .env file!',
       );
     }
 
-    // 3. Gọi super() với giá trị chắc chắn là string (hết lỗi TypeScript)
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
@@ -33,14 +40,32 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  // Payload là dữ liệu ta đã mã hóa vào token lúc Login
-  validate(payload: JwtPayload): JwtRequestUser {
-    // Trả về dữ liệu để gán vào req.user
+  async validate(payload: JwtPayload): Promise<JwtRequestUser> {
+    if (!payload.sub || !Types.ObjectId.isValid(payload.sub)) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ');
+    }
+
+    const user = await this.userModel
+      .findOne({
+        _id: new Types.ObjectId(payload.sub),
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id email username')
+      .lean<JwtUserLookup>()
+      .exec();
+
+    if (!user) {
+      throw new UnauthorizedException('Phiên đăng nhập không còn hợp lệ');
+    }
+
+    const userId = user._id.toString();
+
     return {
-      _id: payload.sub,
-      id: payload.sub,
-      email: payload.email,
-      username: payload.username,
+      _id: userId,
+      id: userId,
+      email: user.email,
+      username: user.username,
     };
   }
 }

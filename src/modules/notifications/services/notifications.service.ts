@@ -5,7 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, PipelineStage, Types } from 'mongoose';
+import {
+  Model,
+  Types,
+  type AnyBulkWriteOperation,
+  type PipelineStage,
+} from 'mongoose';
 import {
   Notification,
   NotificationType,
@@ -19,7 +24,10 @@ const MAX_VISIBLE_NOTIFICATION_ACTORS = 3;
 const NOTIFICATION_CONTENT = {
   FOLLOW: 'đã bắt đầu theo dõi bạn',
   REACTION: 'đã thả tim bài viết của bạn',
+  RECAP: 'Weekly Recap của bạn đã sẵn sàng',
 } as const;
+
+const RECAP_NOTIFICATION_BULK_CHUNK_SIZE = 500;
 
 type MongoDuplicateKeyError = {
   code?: number;
@@ -35,6 +43,26 @@ type CreateReactionNotificationInput = {
   postOwnerId: Types.ObjectId;
   postId: Types.ObjectId;
   postPublicId: string;
+};
+
+type CreateRecapReadyNotificationTarget = {
+  recapId: Types.ObjectId;
+  recipientId: Types.ObjectId;
+  weekKey: string;
+  weekStart: Date;
+  weekEnd: Date;
+  timezone: string;
+};
+
+type CreateRecapReadyNotificationsInput = {
+  targets: CreateRecapReadyNotificationTarget[];
+};
+
+type CreateRecapReadyNotificationsResult = {
+  attempted: number;
+  created: number;
+  matched: number;
+  modified: number;
 };
 
 type NotificationActorResponse = {
@@ -248,6 +276,12 @@ export class NotificationsService {
   }: CreateFollowNotificationInput): Promise<void> {
     if (followerId.equals(targetUserId)) return;
 
+    if (
+      !(await this.canCreateNotification(targetUserId, NotificationType.FOLLOW))
+    ) {
+      return;
+    }
+
     const now = new Date();
     const dedupeKey = `follow:${targetUserId.toString()}:${followerId.toString()}`;
 
@@ -288,6 +322,15 @@ export class NotificationsService {
   }: CreateReactionNotificationInput): Promise<void> {
     if (actorId.equals(postOwnerId)) return;
 
+    if (
+      !(await this.canCreateNotification(
+        postOwnerId,
+        NotificationType.REACTION,
+      ))
+    ) {
+      return;
+    }
+
     const now = new Date();
     const dedupeKey = `reaction:${postOwnerId.toString()}:${postId.toString()}`;
 
@@ -322,6 +365,111 @@ export class NotificationsService {
 
       this.logReactionNotificationError(actorId, postPublicId, error);
     }
+  }
+
+  async createRecapReadyNotifications({
+    targets,
+  }: CreateRecapReadyNotificationsInput): Promise<CreateRecapReadyNotificationsResult> {
+    if (targets.length === 0) {
+      return {
+        attempted: 0,
+        created: 0,
+        matched: 0,
+        modified: 0,
+      };
+    }
+
+    const allowedUsers = await this.userModel
+      .find({
+        _id: { $in: targets.map((target) => target.recipientId) },
+        isDeleted: false,
+        status: 'active',
+        'notificationSettings.enabled': { $ne: false },
+        'notificationSettings.recap': { $ne: false },
+      })
+      .select('_id')
+      .lean<{ _id: Types.ObjectId }[]>()
+      .exec();
+
+    const allowedRecipientIdSet = new Set(
+      allowedUsers.map((user) => user._id.toString()),
+    );
+
+    const allowedTargets = targets.filter((target) =>
+      allowedRecipientIdSet.has(target.recipientId.toString()),
+    );
+
+    if (allowedTargets.length === 0) {
+      return {
+        attempted: 0,
+        created: 0,
+        matched: 0,
+        modified: 0,
+      };
+    }
+
+    const now = new Date();
+    let created = 0;
+    let matched = 0;
+    let modified = 0;
+
+    for (
+      let index = 0;
+      index < allowedTargets.length;
+      index += RECAP_NOTIFICATION_BULK_CHUNK_SIZE
+    ) {
+      const chunk = allowedTargets.slice(
+        index,
+        index + RECAP_NOTIFICATION_BULK_CHUNK_SIZE,
+      );
+
+      const operations: AnyBulkWriteOperation<Notification>[] = chunk.map(
+        (target) => {
+          const dedupeKey = this.buildRecapDedupeKey(
+            target.recipientId,
+            target.weekKey,
+            target.timezone,
+          );
+
+          return {
+            updateOne: {
+              filter: { dedupeKey },
+              update: {
+                $setOnInsert: {
+                  recipientId: target.recipientId,
+                  type: NotificationType.RECAP,
+                  actorIds: [],
+                  countedActorIds: [],
+                  actorCount: 0,
+                  otherCount: 0,
+                  content: NOTIFICATION_CONTENT.RECAP,
+                  targetId: target.recapId,
+                  dedupeKey,
+                  isRead: false,
+                  expiresAt: this.buildExpiryDate(now),
+                },
+              },
+              upsert: true,
+            },
+          };
+        },
+      );
+
+      const result = await this.notificationModel.bulkWrite(operations, {
+        ordered: false,
+      });
+
+      created += result.upsertedCount;
+      matched += result.matchedCount;
+      modified += result.modifiedCount;
+    }
+
+    return {
+      attempted: allowedTargets.length,
+      created,
+      matched,
+      modified,
+    };
   }
 
   private async upsertFollowNotification({
@@ -426,10 +574,7 @@ export class NotificationsService {
           targetId: postId,
           targetPublicId: postPublicId,
           dedupeKey,
-          isRead: false,
-          expiresAt,
           createdAt: { $ifNull: ['$createdAt', now] },
-          updatedAt: now,
           _currentActorIds: { $ifNull: ['$actorIds', []] },
           _currentCountedActorIds: { $ifNull: ['$countedActorIds', []] },
         },
@@ -441,6 +586,31 @@ export class NotificationsService {
           },
           _actorAlreadyCounted: {
             $in: [actorId, '$_currentCountedActorIds'],
+          },
+        },
+      },
+      {
+        $set: {
+          isRead: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$isRead', false] },
+              false,
+            ],
+          },
+          expiresAt: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$expiresAt', expiresAt] },
+              expiresAt,
+            ],
+          },
+          updatedAt: {
+            $cond: [
+              '$_actorAlreadyCounted',
+              { $ifNull: ['$updatedAt', now] },
+              now,
+            ],
           },
         },
       },
@@ -566,7 +736,7 @@ export class NotificationsService {
       actors.map((actor) => [
         actor._id.toString(),
         {
-          id: actor._id.toString(),
+          id: actor.publicId,
           publicId: actor.publicId,
           username: actor.username,
           fullname: actor.fullname,
@@ -598,11 +768,55 @@ export class NotificationsService {
     };
   }
 
+  private getNotificationSettingField(
+    type: NotificationType,
+  ): 'follow' | 'reaction' | 'recap' | null {
+    switch (type) {
+      case NotificationType.FOLLOW:
+        return 'follow';
+      case NotificationType.REACTION:
+        return 'reaction';
+      case NotificationType.RECAP:
+        return 'recap';
+      default:
+        return null;
+    }
+  }
+
+  private async canCreateNotification(
+    recipientId: Types.ObjectId,
+    type: NotificationType,
+  ): Promise<boolean> {
+    const settingField = this.getNotificationSettingField(type);
+
+    if (!settingField) return true;
+
+    const user = await this.userModel
+      .exists({
+        _id: recipientId,
+        isDeleted: false,
+        status: 'active',
+        'notificationSettings.enabled': { $ne: false },
+        [`notificationSettings.${settingField}`]: { $ne: false },
+      })
+      .exec();
+
+    return Boolean(user);
+  }
+
   private toObjectId(value: string): Types.ObjectId {
     if (!Types.ObjectId.isValid(value)) {
       throw new BadRequestException('ID không hợp lệ');
     }
 
     return new Types.ObjectId(value);
+  }
+
+  private buildRecapDedupeKey(
+    recipientId: Types.ObjectId,
+    weekKey: string,
+    timezone: string,
+  ): string {
+    return `recap:${recipientId.toString()}:${weekKey}:${timezone}`;
   }
 }

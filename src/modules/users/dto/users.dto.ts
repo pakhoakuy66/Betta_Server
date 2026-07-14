@@ -1,4 +1,4 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   IsOptional,
@@ -8,9 +8,13 @@ import {
   IsUrl,
   Matches,
   ValidateIf,
+  IsNotEmpty,
   IsInt,
   Max,
   Min,
+  IsArray,
+  ArrayMaxSize,
+  IsBoolean,
 } from 'class-validator';
 
 const trimString = (value: unknown): unknown =>
@@ -91,4 +95,105 @@ export class SearchUsersQueryDto {
   @Min(1, { message: 'Limit tối thiểu là 1' })
   @Max(20, { message: 'Limit tối đa là 20' })
   limit: number = 10;
+}
+
+const INVALID_PUBLIC_ID_MARKER = '__invalid_public_id__';
+
+const normalizePublicIdItem = (value: unknown): string => {
+  if (typeof value === 'string') return value.trim();
+
+  return INVALID_PUBLIC_ID_MARKER;
+};
+
+const normalizePublicIdRawValues = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) {
+    return value as unknown[];
+  }
+
+  return [value];
+};
+
+const normalizePublicIdList = (value: unknown): string[] => {
+  if (value === undefined || value === null || value === '') return [];
+
+  const values: string[] = [];
+
+  normalizePublicIdRawValues(value).forEach((item) => {
+    if (typeof item === 'string') {
+      values.push(...item.split(','));
+      return;
+    }
+
+    values.push(normalizePublicIdItem(item));
+  });
+
+  return values.map(normalizePublicIdItem).filter((item) => item.length > 0);
+};
+
+export class SuggestUsersQueryDto {
+  @ApiPropertyOptional({
+    example: 10,
+    description: 'Số lượng user gợi ý cần lấy, tối đa 30',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'Limit phải là số nguyên' })
+  @Min(1, { message: 'Limit tối thiểu là 1' })
+  @Max(30, { message: 'Limit tối đa là 30' })
+  limit: number = 10;
+
+  @ApiPropertyOptional({
+    example: 'usr_abc123,usr_def456',
+    description:
+      'Danh sách publicId đã hiển thị trong phiên Feed hiện tại để tránh trùng gợi ý',
+  })
+  @Transform(({ value }: TransformFnParams) => normalizePublicIdList(value))
+  @IsOptional()
+  @IsArray({ message: 'excludePublicIds phải là danh sách publicId' })
+  @ArrayMaxSize(100, {
+    message: 'excludePublicIds không được vượt quá 100 phần tử',
+  })
+  @Matches(/^usr_[A-Za-z0-9_-]{6,40}$/, {
+    each: true,
+    message: 'excludePublicIds chứa publicId không hợp lệ',
+  })
+  excludePublicIds: string[] = [];
+}
+
+export class DeleteMyAccountDto {
+  @ApiProperty({
+    example: 'MyPassword@123',
+    description: 'Mật khẩu hiện tại để xác nhận xóa tài khoản',
+  })
+  @IsString({ message: 'Mật khẩu xác nhận phải là chuỗi' })
+  @IsNotEmpty({ message: 'Vui lòng nhập mật khẩu để xác nhận xóa tài khoản' })
+  @Matches(/\S/, {
+    message: 'Vui lòng nhập mật khẩu để xác nhận xóa tài khoản',
+  })
+  @MaxLength(128, {
+    message: 'Mật khẩu xác nhận không được vượt quá 128 ký tự',
+  })
+  currentPassword!: string;
+}
+
+export class UpdateNotificationSettingsDto {
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean({ message: 'Trạng thái thông báo phải là boolean' })
+  enabled?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean({ message: 'Trạng thái thông báo follow phải là boolean' })
+  follow?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean({ message: 'Trạng thái thông báo reaction phải là boolean' })
+  reaction?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean({ message: 'Trạng thái thông báo recap phải là boolean' })
+  recap?: boolean;
 }

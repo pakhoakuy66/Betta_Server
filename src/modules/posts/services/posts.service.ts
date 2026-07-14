@@ -14,6 +14,7 @@ import {
   UploadsService,
 } from '../../uploads/services/uploads.service';
 import { StreakService } from '../../streak/services/streak.service';
+import { RecapService } from '../../recap/services/recap.service';
 import { CreatePostDto } from '../dto/create-post.dto';
 import {
   generatePostPublicId,
@@ -22,7 +23,10 @@ import {
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { Reaction } from '../../reactions/schemas/reaction.schema';
+import { PostShare } from '../schemas/post-share.schema';
 import { FeedQueryDto, ProfilePostsQueryDto } from '../dto/post-query.dto';
+
+const POST_SHARE_WINDOW_MS = 10 * 60 * 1000;
 
 type UploadFile = {
   buffer: Buffer;
@@ -43,6 +47,29 @@ type PostAuthor = {
   fullname: string;
   avatar: string | null;
   streakCount: number;
+};
+
+type PublicPostAuthor = {
+  id: string;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string | null;
+  streakCount: number;
+};
+
+type PublicPostResponse = {
+  id: string;
+  publicId: string;
+  content: string;
+  images: { url: string; publicId: string }[];
+  likeCount: number;
+  shareCount: number;
+  isReacted?: boolean;
+  expireAt: Date;
+  createdAt: Date;
+  updatedAt?: Date;
+  author?: PublicPostAuthor | null;
 };
 
 type PostListItem = {
@@ -71,13 +98,17 @@ export class PostsService {
     private readonly blockModel: Model<Block>,
     @InjectModel(Reaction.name)
     private readonly reactionModel: Model<Reaction>,
+    @InjectModel(PostShare.name)
+    private readonly postShareModel: Model<PostShare>,
     private readonly streakService: StreakService,
+    private readonly recapService: RecapService,
   ) {}
 
   async createPost(
     authorId: string,
     dto: CreatePostDto,
     files: UploadFile[] = [],
+    idempotencyKey?: string,
   ) {
     if (!Types.ObjectId.isValid(authorId)) {
       throw new BadRequestException('User ID không hợp lệ');
@@ -85,6 +116,8 @@ export class PostsService {
 
     const userObjectId = new Types.ObjectId(authorId);
     const normalizedContent = dto.content?.trim() ?? '';
+    const normalizedIdempotencyKey =
+      this.normalizeIdempotencyKey(idempotencyKey);
 
     const hasContent = normalizedContent.length > 0;
     const hasImages = files.length > 0;
@@ -109,6 +142,19 @@ export class PostsService {
       throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
     }
 
+    const existingPost = await this.findPostByIdempotencyKey(
+      userObjectId,
+      normalizedIdempotencyKey,
+    );
+
+    if (existingPost) {
+      return {
+        success: true,
+        message: 'Tạo bài viết thành công',
+        data: this.toPostResponse(existingPost),
+      };
+    }
+
     let uploadedImages: UploadedImage[] = [];
     let createdPost: Post | null = null;
 
@@ -118,6 +164,7 @@ export class PostsService {
       createdPost = await this.createPostWithPublicId({
         authorId: userObjectId,
         content: normalizedContent,
+        idempotencyKey: normalizedIdempotencyKey,
         images: uploadedImages.map((image) => ({
           url: image.url,
           publicId: image.publicId,
@@ -139,12 +186,39 @@ export class PostsService {
 
       await this.streakService.recordPostCreated(userObjectId, postCreatedAt);
 
+      await this.recapService.recordPostCreatedEvent({
+        actorId: userObjectId,
+        postId: createdPost._id,
+        postPublicId: createdPost.publicId,
+        occurredAt: postCreatedAt,
+      });
+
       return {
         success: true,
         message: 'Tạo bài viết thành công',
         data: this.toPostResponse(createdPost),
       };
     } catch (error) {
+      if (this.isIdempotencyDuplicate(error)) {
+        if (uploadedImages.length > 0) {
+          await this.deleteDuplicateUploadedImages(uploadedImages);
+          uploadedImages = [];
+        }
+
+        const existingPost = await this.findPostByIdempotencyKey(
+          userObjectId,
+          normalizedIdempotencyKey,
+        );
+
+        if (existingPost) {
+          return {
+            success: true,
+            message: 'Tạo bài viết thành công',
+            data: this.toPostResponse(existingPost),
+          };
+        }
+      }
+
       if (createdPost?._id) {
         await this.postModel.deleteOne({ _id: createdPost._id });
       }
@@ -560,9 +634,69 @@ export class PostsService {
     };
   }
 
+  async recordPostShare(currentUserId: string, publicId: string) {
+    const { currentObjectId, post } = await this.findVisiblePostForCurrentUser(
+      currentUserId,
+      publicId,
+    );
+
+    const now = new Date();
+    const windowKey = Math.floor(now.getTime() / POST_SHARE_WINDOW_MS);
+    const expiresAt = new Date(now.getTime() + POST_SHARE_WINDOW_MS);
+
+    const counted = await this.tryCreatePostShareWindow({
+      userId: currentObjectId,
+      postId: post._id,
+      postPublicId: post.publicId,
+      windowKey,
+      expiresAt,
+    });
+
+    if (!counted) {
+      const shareCount = await this.getCurrentPostShareCount(post._id);
+
+      return {
+        success: true,
+        message: 'Đã ghi nhận chia sẻ bài viết',
+        data: {
+          counted: false,
+          shareCount,
+        },
+      };
+    }
+
+    const updatedPost = await this.postModel
+      .findOneAndUpdate(
+        {
+          _id: post._id,
+          expireAt: { $gt: new Date() },
+          isDeletedByAdmin: false,
+        },
+        { $inc: { shareCount: 1 } },
+        { returnDocument: 'after' },
+      )
+      .select('shareCount')
+      .lean<{ shareCount: number }>()
+      .exec();
+
+    if (!updatedPost) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    return {
+      success: true,
+      message: 'Đã ghi nhận chia sẻ bài viết',
+      data: {
+        counted: true,
+        shareCount: updatedPost.shareCount,
+      },
+    };
+  }
+
   private async createPostWithPublicId(data: {
     authorId: Types.ObjectId;
     content: string;
+    idempotencyKey: string | null;
     images: { url: string; publicId: string }[];
   }) {
     const MAX_PUBLIC_ID_RETRIES = 5;
@@ -591,6 +725,185 @@ export class PostsService {
     throw new BadRequestException('Không thể tạo mã định danh cho bài viết');
   }
 
+  private normalizeIdempotencyKey(idempotencyKey?: string): string | null {
+    const normalizedKey = idempotencyKey?.trim();
+
+    if (!normalizedKey) return null;
+
+    const isValidKey = /^[A-Za-z0-9_-]{16,80}$/.test(normalizedKey);
+
+    if (!isValidKey) {
+      throw new BadRequestException('Idempotency-Key không hợp lệ');
+    }
+
+    return normalizedKey;
+  }
+
+  private isIdempotencyDuplicate(error: unknown): boolean {
+    const mongoError = error as MongoDuplicateError;
+
+    return (
+      mongoError.code === 11000 &&
+      Boolean(mongoError.keyPattern?.idempotencyKey)
+    );
+  }
+
+  private async findPostByIdempotencyKey(
+    authorId: Types.ObjectId,
+    idempotencyKey: string | null,
+  ): Promise<Post | null> {
+    if (!idempotencyKey) return null;
+
+    return this.postModel
+      .findOne({
+        authorId,
+        idempotencyKey,
+      })
+      .exec();
+  }
+
+  private async deleteDuplicateUploadedImages(
+    uploadedImages: UploadedImage[],
+  ): Promise<void> {
+    try {
+      await this.uploadsService.deleteImages(
+        uploadedImages.map((image) => image.publicId),
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      this.logger.warn(`Failed to cleanup duplicate post images: ${message}`);
+    }
+  }
+
+  private async tryCreatePostShareWindow(data: {
+    userId: Types.ObjectId;
+    postId: Types.ObjectId;
+    postPublicId: string;
+    windowKey: number;
+    expiresAt: Date;
+  }): Promise<boolean> {
+    try {
+      const result = await this.postShareModel
+        .updateOne(
+          {
+            userId: data.userId,
+            postId: data.postId,
+            windowKey: data.windowKey,
+          },
+          {
+            $setOnInsert: data,
+          },
+          { upsert: true },
+        )
+        .exec();
+
+      return result.upsertedCount > 0;
+    } catch (error) {
+      const mongoError = error as MongoDuplicateError;
+
+      if (mongoError.code === 11000) {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  private async findVisiblePostForCurrentUser(
+    currentUserId: string,
+    publicId: string,
+  ): Promise<{ currentObjectId: Types.ObjectId; post: Post }> {
+    if (!Types.ObjectId.isValid(currentUserId)) {
+      throw new BadRequestException('User ID không hợp lệ');
+    }
+
+    if (!isValidPostPublicId(publicId)) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    const currentObjectId = new Types.ObjectId(currentUserId);
+
+    const [currentUser, post] = await Promise.all([
+      this.userModel
+        .findOne({ _id: currentObjectId, isDeleted: false, status: 'active' })
+        .select('_id')
+        .lean()
+        .exec(),
+
+      this.postModel
+        .findOne({
+          publicId,
+          expireAt: { $gt: new Date() },
+          isDeletedByAdmin: false,
+        })
+        .exec(),
+    ]);
+
+    if (!currentUser) {
+      throw new NotFoundException('Tài khoản không tồn tại hoặc đã bị khóa');
+    }
+
+    if (!post) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    const isOwner = post.authorId.equals(currentObjectId);
+
+    const [author, blockRecord] = await Promise.all([
+      this.userModel
+        .findOne({ _id: post.authorId, isDeleted: false, status: 'active' })
+        .select('_id')
+        .lean()
+        .exec(),
+
+      this.blockModel
+        .findOne({
+          $or: [
+            { blockerId: currentObjectId, blockedId: post.authorId },
+            { blockerId: post.authorId, blockedId: currentObjectId },
+          ],
+        })
+        .select('_id')
+        .lean()
+        .exec(),
+    ]);
+
+    if (!author || blockRecord) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    if (!isOwner) {
+      const relationship = await this.relationshipModel
+        .findOne({
+          followerId: currentObjectId,
+          followingId: post.authorId,
+        })
+        .select('_id')
+        .lean()
+        .exec();
+
+      if (!relationship) {
+        throw new ForbiddenException(
+          'Bạn cần theo dõi người dùng này để chia sẻ bài viết',
+        );
+      }
+    }
+
+    return { currentObjectId, post };
+  }
+
+  private toPublicPostAuthor(author: PostAuthor): PublicPostAuthor {
+    return {
+      id: author.publicId,
+      publicId: author.publicId,
+      username: author.username,
+      fullname: author.fullname,
+      avatar: author.avatar ?? null,
+      streakCount: author.streakCount ?? 0,
+    };
+  }
+
   private toPostResponse(post: Post) {
     return {
       id: post.publicId,
@@ -603,7 +916,6 @@ export class PostsService {
       likeCount: post.likeCount,
       shareCount: post.shareCount,
       expireAt: post.expireAt,
-      isDeletedByAdmin: post.isDeletedByAdmin,
       createdAt: post.get('createdAt') as Date,
       updatedAt: post.get('updatedAt') as Date,
     };
@@ -645,7 +957,7 @@ export class PostsService {
     post: PostListItem,
     authorMap: Map<string, PostAuthor>,
     reactedPostIds: Set<string>,
-  ) {
+  ): PublicPostResponse {
     const author = authorMap.get(post.authorId.toString());
 
     return {
@@ -661,16 +973,7 @@ export class PostsService {
       isReacted: reactedPostIds.has(post._id.toString()),
       expireAt: post.expireAt,
       createdAt: post.createdAt,
-      author: author
-        ? {
-            id: author._id.toString(),
-            publicId: author.publicId,
-            username: author.username,
-            fullname: author.fullname,
-            avatar: author.avatar ?? null,
-            streakCount: author.streakCount ?? 0,
-          }
-        : null,
+      author: author ? this.toPublicPostAuthor(author) : null,
     };
   }
 
@@ -678,7 +981,7 @@ export class PostsService {
     post: Post,
     author: PostAuthor,
     reactedPostIds: Set<string>,
-  ) {
+  ): PublicPostResponse {
     return {
       id: post.publicId,
       publicId: post.publicId,
@@ -693,15 +996,28 @@ export class PostsService {
       expireAt: post.expireAt,
       createdAt: post.get('createdAt') as Date,
       updatedAt: post.get('updatedAt') as Date,
-      author: {
-        id: author._id.toString(),
-        publicId: author.publicId,
-        username: author.username,
-        fullname: author.fullname,
-        avatar: author.avatar,
-        streakCount: author.streakCount,
-      },
+      author: this.toPublicPostAuthor(author),
     };
+  }
+
+  private async getCurrentPostShareCount(
+    postId: Types.ObjectId,
+  ): Promise<number> {
+    const post = await this.postModel
+      .findOne({
+        _id: postId,
+        expireAt: { $gt: new Date() },
+        isDeletedByAdmin: false,
+      })
+      .select('shareCount')
+      .lean<{ shareCount: number }>()
+      .exec();
+
+    if (!post) {
+      throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
+    }
+
+    return post.shareCount;
   }
 
   private async getReactedPostIdSet(

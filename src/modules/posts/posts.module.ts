@@ -4,6 +4,7 @@ import { PostsService } from './services/posts.service';
 import { PostsController } from './controllers/posts.controller';
 import { UploadsModule } from '../uploads/uploads.module';
 import { StreakModule } from '../streak/streak.module';
+import { RecapModule } from '../recap/recap.module';
 import { Post, PostSchema } from './schemas/post.schema';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import {
@@ -12,17 +13,20 @@ import {
 } from '../relationshipModule/schemas/relationship.schema';
 import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 import { Reaction, ReactionSchema } from '../reactions/schemas/reaction.schema';
+import { PostShare, PostShareSchema } from './schemas/post-share.schema';
 
 @Module({
   imports: [
     UploadsModule,
     StreakModule,
+    RecapModule,
     MongooseModule.forFeature([
       { name: Post.name, schema: PostSchema },
       { name: User.name, schema: UserSchema },
       { name: Relationship.name, schema: RelationshipSchema },
       { name: Block.name, schema: BlockSchema },
       { name: Reaction.name, schema: ReactionSchema },
+      { name: PostShare.name, schema: PostShareSchema },
     ]),
   ],
   providers: [PostsService],

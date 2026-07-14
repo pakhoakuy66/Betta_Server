@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import { User } from '../../users/schemas/user.schema';
@@ -42,6 +42,28 @@ type StreakCandidateFilter = {
   status: 'active';
   streakCount: { $gt: number };
   _id?: { $gt: Types.ObjectId };
+};
+
+type StreakHistoryLean = {
+  date: string;
+  hasPosted: boolean;
+  pointsChanged: number;
+  currentStreakCount: number;
+};
+
+type MyStreakHistoryResponse = {
+  success: true;
+  data: {
+    currentStreakCount: number;
+    totalDaysInWindow: number;
+    postedDaysInWindow: number;
+    missedDaysInWindow: number;
+    history: StreakHistoryLean[];
+  };
+  meta: {
+    limit: number;
+    count: number;
+  };
 };
 
 @Injectable()
@@ -259,6 +281,66 @@ export class StreakService {
     );
 
     return summary;
+  }
+
+  async getMyStreakHistory(
+    userId: string | Types.ObjectId,
+    limit: number,
+  ): Promise<MyStreakHistoryResponse> {
+    if (typeof userId === 'string' && !Types.ObjectId.isValid(userId)) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ');
+    }
+
+    const userObjectId =
+      userId instanceof Types.ObjectId ? userId : new Types.ObjectId(userId);
+
+    const safeLimit = Math.min(Math.max(limit, 1), 90);
+
+    const user = await this.userModel
+      .findOne({
+        _id: userObjectId,
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('streakCount')
+      .lean<{ streakCount: number }>()
+      .exec();
+
+    if (!user) {
+      throw new UnauthorizedException('Phiên đăng nhập không còn hợp lệ');
+    }
+
+    const histories = await this.streakHistoryModel
+      .find({ userId: userObjectId })
+      .sort({ date: -1 })
+      .limit(safeLimit)
+      .select('-_id date hasPosted pointsChanged currentStreakCount')
+      .lean<StreakHistoryLean[]>()
+      .exec();
+
+    const history = histories.map((item) => ({
+      date: item.date,
+      hasPosted: item.hasPosted,
+      pointsChanged: item.pointsChanged,
+      currentStreakCount: item.currentStreakCount,
+    }));
+
+    const postedDaysInWindow = history.filter((item) => item.hasPosted).length;
+
+    return {
+      success: true,
+      data: {
+        currentStreakCount: user.streakCount ?? 0,
+        totalDaysInWindow: history.length,
+        postedDaysInWindow,
+        missedDaysInWindow: history.length - postedDaysInWindow,
+        history,
+      },
+      meta: {
+        limit: safeLimit,
+        count: history.length,
+      },
+    };
   }
 
   private async decayOneUserForDate(

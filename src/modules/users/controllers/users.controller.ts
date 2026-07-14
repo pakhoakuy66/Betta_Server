@@ -20,7 +20,13 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UsersService } from '../services/users.service';
-import { SearchUsersQueryDto, UpdateProfileDto } from '../dto/users.dto';
+import {
+  SearchUsersQueryDto,
+  SuggestUsersQueryDto,
+  UpdateProfileDto,
+  DeleteMyAccountDto,
+  UpdateNotificationSettingsDto,
+} from '../dto/users.dto';
 import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt.guard';
 import type {
   AuthenticatedRequest,
@@ -48,6 +54,36 @@ export class UsersController {
     @Query() query: SearchUsersQueryDto,
   ) {
     return this.usersService.searchUsers(req.user._id, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Lấy danh sách user gợi ý để follow' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get('suggestions')
+  async suggestUsers(
+    @Request() req: AuthenticatedRequest,
+    @Query() query: SuggestUsersQueryDto,
+  ) {
+    return this.usersService.suggestUsers(req.user._id, query);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Lấy cài đặt thông báo của user hiện tại' })
+  @UseGuards(AuthGuard('jwt'))
+  @Get('me/notification-settings')
+  getMyNotificationSettings(@Request() req: AuthenticatedRequest) {
+    return this.usersService.getMyNotificationSettings(req.user._id);
+  }
+
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Cập nhật cài đặt thông báo của user hiện tại' })
+  @UseGuards(AuthGuard('jwt'))
+  @Patch('me/notification-settings')
+  updateMyNotificationSettings(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateNotificationSettingsDto,
+  ) {
+    return this.usersService.updateMyNotificationSettings(req.user._id, dto);
   }
 
   @ApiOperation({ summary: 'Lấy thông tin cá nhân của người dùng bất kỳ' })
@@ -106,10 +142,12 @@ export class UsersController {
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Người dùng tự xóa mềm tài khoản của chính mình' })
   @UseGuards(AuthGuard('jwt'))
-  @Delete('me') // Đường dẫn API sẽ là: DELETE /users/me
-  async deleteMyAccount(@Request() req: AuthenticatedRequest) {
-    const userId = req.user._id; // Tự động lấy ID của chính họ từ JWT Token sau khi đăng nhập
-    return this.usersService.softDeleteUser(userId);
+  @Delete('me')
+  async deleteMyAccount(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: DeleteMyAccountDto,
+  ) {
+    return this.usersService.softDeleteUser(req.user._id, dto.currentPassword);
   }
 
   // @ApiOperation({

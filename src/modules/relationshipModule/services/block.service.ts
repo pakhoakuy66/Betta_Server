@@ -1,10 +1,11 @@
-import {
+﻿import {
   Injectable,
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, Model, Types } from 'mongoose';
+import { ClientSession, Connection, Model, Types } from 'mongoose';
+import { acquireSocialGraphPairLock } from '../utils/social-graph-lock.util';
 import { Block } from '../schemas/block.schema';
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
@@ -15,13 +16,15 @@ type MongoDuplicateKeyError = {
 
 type PopulatedBlockedUser = {
   _id: Types.ObjectId;
-  publicId?: string;
+  publicId: string;
   username: string;
   fullname: string;
   avatar?: string;
   streakCount?: number;
   isDeleted?: boolean;
 };
+
+const USER_PUBLIC_ID_REGEX = /^usr_[A-Za-z0-9_-]{6,40}$/;
 
 @Injectable()
 export class BlockService {
@@ -47,6 +50,77 @@ export class BlockService {
     return new Types.ObjectId(id);
   }
 
+  private buildUserLookupFilter(
+    identifier: string,
+  ): { _id: Types.ObjectId } | { publicId: string } {
+    if (Types.ObjectId.isValid(identifier)) {
+      return { _id: new Types.ObjectId(identifier) };
+    }
+
+    if (USER_PUBLIC_ID_REGEX.test(identifier)) {
+      return { publicId: identifier };
+    }
+
+    throw new BadRequestException('Người dùng không hợp lệ');
+  }
+
+  private async decrementCounter(
+    userId: Types.ObjectId,
+    field: 'followersCount' | 'followingCount',
+    session: ClientSession,
+  ): Promise<void> {
+    const result = await this.userModel.updateOne(
+      {
+        _id: userId,
+        isDeleted: false,
+      },
+      [
+        {
+          $set: {
+            [field]: {
+              $max: [
+                0,
+                {
+                  $subtract: [{ $ifNull: [`$${field}`, 0] }, 1],
+                },
+              ],
+            },
+          },
+        },
+      ],
+      {
+        session,
+        updatePipeline: true,
+      },
+    );
+
+    if (result.matchedCount !== 1) {
+      throw new ConflictException(
+        'Không thể cập nhật quan hệ người dùng lúc này',
+      );
+    }
+  }
+
+  private async resolveActiveUserObjectId(
+    identifier: string,
+  ): Promise<Types.ObjectId> {
+    const user = await this.userModel
+      .findOne({
+        ...this.buildUserLookupFilter(identifier),
+        isDeleted: false,
+        status: 'active',
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!user) {
+      throw new BadRequestException('Người dùng không tồn tại hoặc đã bị khóa');
+    }
+
+    return user._id;
+  }
+
   private isDuplicateKeyError(error: unknown): boolean {
     return (
       typeof error === 'object' &&
@@ -56,145 +130,94 @@ export class BlockService {
   }
 
   async blockUser(currentUserId: string, targetUserId: string) {
-    if (currentUserId === targetUserId) {
-      throw new BadRequestException('Bạn không thể tự chặn chính mình');
-    }
-
     const blockerId = this.toObjectId(
       currentUserId,
       'ID người dùng hiện tại không hợp lệ',
     );
-    const blockedId = this.toObjectId(
-      targetUserId,
-      'ID người dùng cần chặn không hợp lệ',
-    );
+    const blockedId = await this.resolveActiveUserObjectId(targetUserId);
+
+    if (blockedId.equals(blockerId)) {
+      throw new BadRequestException('Bạn không thể tự chặn chính mình');
+    }
 
     const session = await this.connection.startSession();
 
     try {
-      /*
-       * Transaction đảm bảo block record, relationship cleanup và counter update
-       * cùng commit/rollback. Business exceptions sẽ bubble ra ngoài, không retry
-       * như lỗi transient của MongoDB.
-       */
       await session.withTransaction(async () => {
-        const [targetUser, existingBlock] = await Promise.all([
-          this.userModel
-            .findOne({
-              _id: blockedId,
-              isDeleted: false,
-              status: 'active',
-            })
-            .select('_id')
-            .session(session)
-            .lean()
-            .exec(),
+        await acquireSocialGraphPairLock(
+          this.userModel,
+          blockerId,
+          blockedId,
+          session,
+        );
 
-          this.blockModel
-            .findOne({
-              blockerId,
-              blockedId,
-            })
-            .select('_id')
-            .session(session)
-            .lean()
-            .exec(),
-        ]);
+        const blockerExists = await this.userModel
+          .exists({
+            _id: blockerId,
+            isDeleted: false,
+            status: 'active',
+          })
+          .session(session);
 
-        if (!targetUser) {
+        if (!blockerExists) {
+          throw new BadRequestException(
+            'Tài khoản hiện tại không thể thực hiện thao tác này',
+          );
+        }
+
+        const blockedUserExists = await this.userModel
+          .exists({
+            _id: blockedId,
+            isDeleted: false,
+            status: 'active',
+          })
+          .session(session);
+
+        if (!blockedUserExists) {
           throw new BadRequestException(
             'Người dùng không tồn tại hoặc đã bị khóa',
           );
         }
 
+        const existingBlock = await this.blockModel
+          .exists({
+            blockerId,
+            blockedId,
+          })
+          .session(session);
+
         if (existingBlock) {
           throw new ConflictException('Bạn đã chặn người dùng này rồi');
         }
 
-        await this.blockModel.create([{ blockerId, blockedId }], {
-          session,
-        });
+        await this.blockModel.create([{ blockerId, blockedId }], { session });
 
-        const [currentFollowsTarget, targetFollowsCurrent] = await Promise.all([
-          this.relationshipModel
-            .findOneAndDelete({
+        const currentFollowsTarget =
+          await this.relationshipModel.findOneAndDelete(
+            {
               followerId: blockerId,
               followingId: blockedId,
-            })
-            .session(session)
-            .lean()
-            .exec(),
+            },
+            { session },
+          );
 
-          this.relationshipModel
-            .findOneAndDelete({
+        const targetFollowsCurrent =
+          await this.relationshipModel.findOneAndDelete(
+            {
               followerId: blockedId,
               followingId: blockerId,
-            })
-            .session(session)
-            .lean()
-            .exec(),
-        ]);
-
-        const counterUpdates: Promise<unknown>[] = [];
+            },
+            { session },
+          );
 
         if (currentFollowsTarget) {
-          counterUpdates.push(
-            this.userModel
-              .updateOne(
-                {
-                  _id: blockerId,
-                  isDeleted: false,
-                  followingCount: { $gt: 0 },
-                },
-                { $inc: { followingCount: -1 } },
-                { session },
-              )
-              .exec(),
-
-            this.userModel
-              .updateOne(
-                {
-                  _id: blockedId,
-                  isDeleted: false,
-                  followersCount: { $gt: 0 },
-                },
-                { $inc: { followersCount: -1 } },
-                { session },
-              )
-              .exec(),
-          );
+          await this.decrementCounter(blockerId, 'followingCount', session);
+          await this.decrementCounter(blockedId, 'followersCount', session);
         }
 
         if (targetFollowsCurrent) {
-          counterUpdates.push(
-            this.userModel
-              .updateOne(
-                {
-                  _id: blockedId,
-                  isDeleted: false,
-                  followingCount: { $gt: 0 },
-                },
-                { $inc: { followingCount: -1 } },
-                { session },
-              )
-              .exec(),
-
-            this.userModel
-              .updateOne(
-                {
-                  _id: blockerId,
-                  isDeleted: false,
-                  followersCount: { $gt: 0 },
-                },
-                { $inc: { followersCount: -1 } },
-                { session },
-              )
-              .exec(),
-          );
-        }
-
-        if (counterUpdates.length > 0) {
-          await Promise.all(counterUpdates);
+          await this.decrementCounter(blockedId, 'followingCount', session);
+          await this.decrementCounter(blockerId, 'followersCount', session);
         }
       });
 
@@ -218,10 +241,7 @@ export class BlockService {
       currentUserId,
       'ID người dùng hiện tại không hợp lệ',
     );
-    const blockedId = this.toObjectId(
-      targetUserId,
-      'ID người dùng không hợp lệ',
-    );
+    const blockedId = await this.resolveActiveUserObjectId(targetUserId);
 
     const deleted = await this.blockModel.findOneAndDelete({
       blockerId,
@@ -254,7 +274,7 @@ export class BlockService {
         if (!user || user.isDeleted) return null;
 
         return {
-          id: user._id.toString(),
+          id: user.publicId,
           publicId: user.publicId,
           username: user.username,
           fullname: user.fullname,
