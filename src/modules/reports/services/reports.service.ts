@@ -2,8 +2,6 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  HttpException,
-  HttpStatus,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -17,14 +15,10 @@ import {
   Model,
   Types,
   type ClientSession,
+  type HydratedDocument,
   type UpdateWriteOpResult,
 } from 'mongoose';
 import { InjectConnection } from '@nestjs/mongoose';
-import {
-  Report,
-  ReportReasonGroup,
-  ReportTargetType,
-} from '../schemas/report.schema';
 import { ReportPostDto } from '../dto/report-post.dto';
 import { ReportUserDto } from '../dto/report-user.dto';
 import { ReportIssueDto } from '../dto/report-issue.dto';
@@ -33,20 +27,77 @@ import { User } from '../../users/schemas/user.schema';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { ReportCooldown } from '../schemas/report-cooldown.schema';
-import { SystemReport } from '../schemas/system-report.schema';
+import {
+  Report,
+  ReportReasonGroup,
+  ReportStatus,
+  ReportTargetType,
+} from '../schemas/report.schema';
+
+import {
+  SystemReport,
+  SystemReportStatus,
+} from '../schemas/system-report.schema';
 import { isValidPostPublicId } from '../../posts/utils/generate-post-public-id';
 import { UploadsService } from '../../uploads/services/uploads.service';
+import { ReportRateLimitService } from './report-rate-limit.service';
 
-const REPORT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
-const REPORT_RATE_LIMIT_MAX = 10;
 const POST_REPORT_COOLDOWN_MS = 2 * 60 * 60 * 1000;
 const USER_REPORT_COOLDOWN_MS = 2 * 24 * 60 * 60 * 1000;
 const TRANSACTION_MAX_RETRIES = 3;
 const USER_PUBLIC_ID_PATTERN =
   /^usr_[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{10}$/;
-const SYSTEM_REPORT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
-const SYSTEM_REPORT_RATE_LIMIT_MAX = 5;
 const SYSTEM_REPORT_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
+const POST_REPORT_COOLDOWN_MESSAGE =
+  'Bạn đã báo cáo bài viết này gần đây. Vui lòng thử lại sau 2 tiếng.';
+const USER_REPORT_COOLDOWN_MESSAGE =
+  'Bạn đã báo cáo tài khoản này gần đây. Vui lòng thử lại sau 2 ngày.';
+
+type ReportSubmissionType = 'issue' | 'post' | 'user';
+
+type UserVisibleReportStatus =
+  | 'pending'
+  | 'reviewing'
+  | 'resolved'
+  | 'rejected';
+
+const REPORT_STATUS_TO_PUBLIC = {
+  [ReportStatus.PENDING]: 'pending',
+  [ReportStatus.REVIEWING]: 'reviewing',
+  [ReportStatus.RESOLVED]: 'resolved',
+  [ReportStatus.REJECTED]: 'rejected',
+} satisfies Record<ReportStatus, UserVisibleReportStatus>;
+
+const SYSTEM_REPORT_STATUS_TO_PUBLIC = {
+  [SystemReportStatus.PENDING]: 'pending',
+  [SystemReportStatus.INVESTIGATING]: 'reviewing',
+  [SystemReportStatus.FIXED]: 'resolved',
+  // CLOSED nghĩa là issue bị đóng mà không fix/không hợp lệ/không xử lý.
+  [SystemReportStatus.CLOSED]: 'rejected',
+} satisfies Record<SystemReportStatus, UserVisibleReportStatus>;
+
+type ReportSubmissionData = {
+  type: ReportSubmissionType;
+  status: UserVisibleReportStatus;
+  submittedAt: string;
+};
+
+type ReportSubmissionResponse = {
+  success: true;
+  message: string;
+  data: ReportSubmissionData;
+};
+
+type CreatedReportDocument = HydratedDocument<Report> & {
+  _id: Types.ObjectId;
+  status: ReportStatus;
+  createdAt: Date;
+};
+
+type CreatedSystemReportDocument = HydratedDocument<SystemReport> & {
+  status: SystemReportStatus;
+  createdAt: Date;
+};
 
 type MongoDuplicateKeyError = {
   code?: number;
@@ -118,13 +169,16 @@ export class ReportsService {
     private readonly systemReportModel: Model<SystemReport>,
 
     private readonly uploadsService: UploadsService,
+
+    private readonly reportRateLimitService: ReportRateLimitService,
   ) {}
 
   async reportIssue(
     userId: string,
     dto: ReportIssueDto,
     files: UploadFile[] = [],
-  ) {
+    clientIp?: string,
+  ): Promise<ReportSubmissionResponse> {
     const reporterObjectId = this.toObjectId(userId);
 
     const reporter = await this.userModel
@@ -152,17 +206,24 @@ export class ReportsService {
       descriptionHash,
     );
 
-    await this.assertSystemReportRateLimit(reporterObjectId);
     await this.assertNoRecentDuplicateSystemReport(
       reporterObjectId,
       descriptionHash,
     );
 
+    await this.reportRateLimitService.consumeSystemReport({
+      reporterId: reporterObjectId,
+      clientIp,
+      descriptionHash,
+    });
+
     const uploadedImages =
       await this.uploadsService.uploadSystemReportImages(files);
 
+    let systemReport: CreatedSystemReportDocument;
+
     try {
-      await this.systemReportModel.create({
+      systemReport = (await this.systemReportModel.create({
         reporterId: reporterObjectId,
         description: normalizedDescription,
         descriptionHash,
@@ -171,7 +232,7 @@ export class ReportsService {
           url: image.url,
           publicId: image.publicId,
         })),
-      });
+      })) as CreatedSystemReportDocument;
     } catch (error) {
       try {
         await this.uploadsService.deleteImages(
@@ -200,17 +261,21 @@ export class ReportsService {
     return {
       success: true,
       message: 'Đã gửi báo cáo sự cố',
+      data: this.toReportSubmissionData('issue', systemReport),
     };
   }
 
-  async reportPost(userId: string, publicId: string, dto: ReportPostDto) {
+  async reportPost(
+    userId: string,
+    publicId: string,
+    dto: ReportPostDto,
+    clientIp?: string,
+  ): Promise<ReportSubmissionResponse> {
     const reporterObjectId = this.toObjectId(userId);
 
     if (!isValidPostPublicId(publicId)) {
       throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
     }
-
-    await this.assertReportRateLimit(reporterObjectId);
 
     const now = new Date();
 
@@ -292,8 +357,22 @@ export class ReportsService {
       );
     }
 
-    await this.runInTransaction(async (session) => {
-      const report = await this.createPostReportWithCooldown({
+    await this.assertReportCooldownAvailable({
+      reporterId: reporterObjectId,
+      targetType: ReportTargetType.POST,
+      targetId: post._id,
+      conflictMessage: POST_REPORT_COOLDOWN_MESSAGE,
+    });
+
+    await this.reportRateLimitService.consumeContentReport({
+      reporterId: reporterObjectId,
+      clientIp,
+      targetType: ReportTargetType.POST,
+      targetId: post._id,
+    });
+
+    const report = await this.runInTransaction(async (session) => {
+      const createdReport = await this.createPostReportWithCooldown({
         session,
         reporterId: reporterObjectId,
         post,
@@ -306,17 +385,25 @@ export class ReportsService {
         reporterId: reporterObjectId,
         targetType: ReportTargetType.POST,
         targetId: post._id,
-        reportId: report._id,
+        reportId: createdReport._id,
       });
+
+      return createdReport;
     });
 
     return {
       success: true,
       message: 'Đã gửi báo cáo bài viết',
+      data: this.toReportSubmissionData('post', report),
     };
   }
 
-  async reportUser(userId: string, publicId: string, dto: ReportUserDto) {
+  async reportUser(
+    userId: string,
+    publicId: string,
+    dto: ReportUserDto,
+    clientIp?: string,
+  ): Promise<ReportSubmissionResponse> {
     const reporterObjectId = this.toObjectId(userId);
 
     if (!this.isValidUserPublicId(publicId)) {
@@ -353,8 +440,6 @@ export class ReportsService {
       throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    await this.assertReportRateLimit(reporterObjectId);
-
     if (targetUser._id.equals(reporterObjectId)) {
       throw new BadRequestException(
         'Bạn không thể báo cáo tài khoản của chính mình',
@@ -376,8 +461,22 @@ export class ReportsService {
       throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    await this.runInTransaction(async (session) => {
-      const report = await this.createUserReportWithCooldown({
+    await this.assertReportCooldownAvailable({
+      reporterId: reporterObjectId,
+      targetType: ReportTargetType.USER,
+      targetId: targetUser._id,
+      conflictMessage: USER_REPORT_COOLDOWN_MESSAGE,
+    });
+
+    await this.reportRateLimitService.consumeContentReport({
+      reporterId: reporterObjectId,
+      clientIp,
+      targetType: ReportTargetType.USER,
+      targetId: targetUser._id,
+    });
+
+    const report = await this.runInTransaction(async (session) => {
+      const createdReport = await this.createUserReportWithCooldown({
         session,
         reporterId: reporterObjectId,
         targetUser,
@@ -389,34 +488,69 @@ export class ReportsService {
         reporterId: reporterObjectId,
         targetType: ReportTargetType.USER,
         targetId: targetUser._id,
-        reportId: report._id,
+        reportId: createdReport._id,
       });
+
+      return createdReport;
     });
 
     return {
       success: true,
       message: 'Đã gửi báo cáo tài khoản',
+      data: this.toReportSubmissionData('user', report),
     };
   }
 
-  private async assertReportRateLimit(
-    reporterId: Types.ObjectId,
-  ): Promise<void> {
-    const windowStart = new Date(Date.now() - REPORT_RATE_LIMIT_WINDOW_MS);
+  private toReportSubmissionData(
+    type: 'post' | 'user',
+    report: CreatedReportDocument,
+  ): ReportSubmissionData;
 
-    const reportCount = await this.reportModel
-      .countDocuments({
-        reporterId,
-        createdAt: { $gte: windowStart },
-      })
-      .exec();
+  private toReportSubmissionData(
+    type: 'issue',
+    report: CreatedSystemReportDocument,
+  ): ReportSubmissionData;
 
-    if (reportCount >= REPORT_RATE_LIMIT_MAX) {
-      throw new HttpException(
-        'Bạn đã gửi quá nhiều báo cáo. Vui lòng thử lại sau.',
-        HttpStatus.TOO_MANY_REQUESTS,
+  private toReportSubmissionData(
+    type: ReportSubmissionType,
+    report: CreatedReportDocument | CreatedSystemReportDocument,
+  ): ReportSubmissionData {
+    return {
+      type,
+      status:
+        type === 'issue'
+          ? this.toUserVisibleSystemReportStatus(
+              (report as CreatedSystemReportDocument).status,
+            )
+          : this.toUserVisibleReportStatus(
+              (report as CreatedReportDocument).status,
+            ),
+      submittedAt: this.getSubmittedAt(report),
+    };
+  }
+
+  private toUserVisibleReportStatus(
+    status: ReportStatus,
+  ): UserVisibleReportStatus {
+    return REPORT_STATUS_TO_PUBLIC[status];
+  }
+
+  private toUserVisibleSystemReportStatus(
+    status: SystemReportStatus,
+  ): UserVisibleReportStatus {
+    return SYSTEM_REPORT_STATUS_TO_PUBLIC[status];
+  }
+
+  private getSubmittedAt(document: { createdAt?: Date }): string {
+    const { createdAt } = document;
+
+    if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime())) {
+      throw new InternalServerErrorException(
+        'Report document không có createdAt hợp lệ',
       );
     }
+
+    return createdAt.toISOString();
   }
 
   private isValidUserPublicId(publicId: string): boolean {
@@ -518,28 +652,6 @@ export class ReportsService {
     return `system_issue:${reporterId.toString()}:${descriptionHash}:${bucket}`;
   }
 
-  private async assertSystemReportRateLimit(
-    reporterId: Types.ObjectId,
-  ): Promise<void> {
-    const windowStart = new Date(
-      Date.now() - SYSTEM_REPORT_RATE_LIMIT_WINDOW_MS,
-    );
-
-    const reportCount = await this.systemReportModel
-      .countDocuments({
-        reporterId,
-        createdAt: { $gte: windowStart },
-      })
-      .exec();
-
-    if (reportCount >= SYSTEM_REPORT_RATE_LIMIT_MAX) {
-      throw new HttpException(
-        'Bạn đã gửi quá nhiều báo cáo sự cố. Vui lòng thử lại sau.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-  }
-
   private async assertNoRecentDuplicateSystemReport(
     reporterId: Types.ObjectId,
     descriptionHash: string,
@@ -577,15 +689,14 @@ export class ReportsService {
     post: ReportablePost;
     author: ReportAuthor;
     dto: ReportPostDto;
-  }): Promise<Report> {
+  }): Promise<CreatedReportDocument> {
     await this.acquireReportCooldown({
       session,
       reporterId,
       targetType: ReportTargetType.POST,
       targetId: post._id,
       cooldownMs: POST_REPORT_COOLDOWN_MS,
-      conflictMessage:
-        'Bạn đã báo cáo bài viết này gần đây. Vui lòng thử lại sau 2 tiếng.',
+      conflictMessage: POST_REPORT_COOLDOWN_MESSAGE,
     });
 
     const [report] = await this.reportModel.create(
@@ -611,7 +722,7 @@ export class ReportsService {
       { session },
     );
 
-    return report;
+    return report as CreatedReportDocument;
   }
 
   private async createUserReportWithCooldown({
@@ -624,15 +735,14 @@ export class ReportsService {
     reporterId: Types.ObjectId;
     targetUser: ReportableUser;
     dto: ReportUserDto;
-  }): Promise<Report> {
+  }): Promise<CreatedReportDocument> {
     await this.acquireReportCooldown({
       session,
       reporterId,
       targetType: ReportTargetType.USER,
       targetId: targetUser._id,
       cooldownMs: USER_REPORT_COOLDOWN_MS,
-      conflictMessage:
-        'Bạn đã báo cáo tài khoản này gần đây. Vui lòng thử lại sau 2 ngày.',
+      conflictMessage: USER_REPORT_COOLDOWN_MESSAGE,
     });
 
     const [report] = await this.reportModel.create(
@@ -657,7 +767,7 @@ export class ReportsService {
       { session },
     );
 
-    return report;
+    return report as CreatedReportDocument;
   }
 
   private async acquireReportCooldown({
@@ -756,6 +866,28 @@ export class ReportsService {
       throw new InternalServerErrorException(
         'Không thể cập nhật trạng thái cooldown báo cáo',
       );
+    }
+  }
+
+  private async assertReportCooldownAvailable(options: {
+    reporterId: Types.ObjectId;
+    targetType: ReportTargetType;
+    targetId: Types.ObjectId;
+    conflictMessage: string;
+  }): Promise<void> {
+    const activeCooldown = await this.reportCooldownModel
+      .findOne({
+        reporterId: options.reporterId,
+        targetType: options.targetType,
+        targetId: options.targetId,
+        nextAllowedAt: { $gt: new Date() },
+      })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (activeCooldown) {
+      throw new ConflictException(options.conflictMessage);
     }
   }
 }

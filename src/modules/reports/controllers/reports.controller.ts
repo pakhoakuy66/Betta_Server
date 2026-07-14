@@ -20,7 +20,8 @@ import { ReportsService } from '../services/reports.service';
 import { ReportPostDto } from '../dto/report-post.dto';
 import { ReportUserDto } from '../dto/report-user.dto';
 import { ReportIssueDto } from '../dto/report-issue.dto';
-import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
+import { ReportIssueUploadRateLimitGuard } from '../guards/report-issue-upload-rate-limit.guard';
+import { getRequestIp, type ReportRequest } from '../utils/request-ip.util';
 
 type UploadFile = {
   buffer: Buffer;
@@ -31,13 +32,12 @@ type UploadFile = {
 
 @ApiTags('Reports')
 @ApiBearerAuth('access-token')
-@UseGuards(AuthGuard('jwt'))
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
-  // Issue
   @Post('issues')
+  @UseGuards(AuthGuard('jwt'), ReportIssueUploadRateLimitGuard)
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Báo cáo sự cố hệ thống' })
   @UseInterceptors(
@@ -49,32 +49,47 @@ export class ReportsController {
     }),
   )
   reportIssue(
-    @Request() req: AuthenticatedRequest,
+    @Request() request: ReportRequest,
     @Body() dto: ReportIssueDto,
     @UploadedFiles() files: UploadFile[] = [],
   ) {
-    return this.reportsService.reportIssue(req.user._id, dto, files);
+    return this.reportsService.reportIssue(
+      request.user._id,
+      dto,
+      files,
+      getRequestIp(request),
+    );
   }
 
-  // Post
   @Post('posts/:publicId')
+  @UseGuards(AuthGuard('jwt'))
   @ApiOperation({ summary: 'Báo cáo bài viết theo publicId' })
   reportPost(
-    @Request() req: AuthenticatedRequest,
+    @Request() request: ReportRequest,
     @Param('publicId') publicId: string,
     @Body() dto: ReportPostDto,
   ) {
-    return this.reportsService.reportPost(req.user._id, publicId, dto);
+    return this.reportsService.reportPost(
+      request.user._id,
+      publicId,
+      dto,
+      getRequestIp(request),
+    );
   }
 
-  // User
   @Post('users/:publicId')
+  @UseGuards(AuthGuard('jwt'))
   @ApiOperation({ summary: 'Báo cáo tài khoản theo publicId' })
   reportUser(
-    @Request() req: AuthenticatedRequest,
+    @Request() request: ReportRequest,
     @Param('publicId') publicId: string,
     @Body() dto: ReportUserDto,
   ) {
-    return this.reportsService.reportUser(req.user._id, publicId, dto);
+    return this.reportsService.reportUser(
+      request.user._id,
+      publicId,
+      dto,
+      getRequestIp(request),
+    );
   }
 }

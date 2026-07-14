@@ -8,6 +8,13 @@ export enum SystemReportStatus {
   CLOSED = 'closed',
 }
 
+export enum RetentionCleanupStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  FAILED = 'failed',
+  MANUAL_REVIEW = 'manual_review',
+}
+
 @Schema({ _id: false })
 export class SystemReportEvidence {
   @Prop({ type: String, required: true })
@@ -50,6 +57,28 @@ export class SystemReport extends Document {
 
   @Prop({ type: String, default: '', trim: true, maxlength: 1000 })
   adminNote!: string;
+
+  @Prop({ type: Date, default: null })
+  terminalAt!: Date | null;
+
+  @Prop({
+    type: String,
+    enum: Object.values(RetentionCleanupStatus),
+    default: RetentionCleanupStatus.PENDING,
+  })
+  retentionCleanupStatus!: RetentionCleanupStatus;
+
+  @Prop({ type: Date, default: null })
+  retentionLockedUntil!: Date | null;
+
+  @Prop({ type: String, default: null })
+  retentionLockToken!: string | null;
+
+  @Prop({ type: Number, default: 0, min: 0 })
+  retentionAttempts!: number;
+
+  @Prop({ type: String, default: '', maxlength: 2000 })
+  retentionLastError!: string;
 }
 
 export const SystemReportSchema = SchemaFactory.createForClass(SystemReport);
@@ -67,3 +96,10 @@ SystemReportSchema.index(
 SystemReportSchema.index({ reporterId: 1, createdAt: -1 });
 SystemReportSchema.index({ reporterId: 1, descriptionHash: 1, createdAt: -1 });
 SystemReportSchema.index({ status: 1, createdAt: -1 });
+SystemReportSchema.index({ status: 1, terminalAt: 1 });
+SystemReportSchema.index({
+  retentionCleanupStatus: 1,
+  retentionLockedUntil: 1,
+  retentionAttempts: 1,
+  terminalAt: 1,
+});

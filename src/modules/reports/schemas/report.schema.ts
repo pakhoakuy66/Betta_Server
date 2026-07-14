@@ -119,6 +119,9 @@ export class Report extends Document {
 
   @Prop({ type: String, default: '', trim: true, maxlength: 1000 })
   adminNote!: string;
+
+  @Prop({ type: Date, default: null })
+  terminalAt!: Date | null;
 }
 
 export const ReportSchema = SchemaFactory.createForClass(Report);
@@ -133,3 +136,4 @@ ReportSchema.index({
 ReportSchema.index({ reporterId: 1, createdAt: -1 });
 ReportSchema.index({ targetType: 1, status: 1, createdAt: -1 });
 ReportSchema.index({ status: 1, createdAt: -1 });
+ReportSchema.index({ status: 1, terminalAt: 1 });
