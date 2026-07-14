@@ -6,6 +6,13 @@ export interface TokenPayload {
   username: string;
 }
 
+export interface NotificationSettingsResponse {
+  enabled: boolean;
+  follow: boolean;
+  reaction: boolean;
+  recap: boolean;
+}
+
 export interface PublicUser {
   id: string;
   publicId: string;
@@ -14,8 +21,10 @@ export interface PublicUser {
   email: string;
   phone: string;
   avatar: string | null;
+  hasCustomAvatar: boolean;
   streakCount: number;
   status: string;
+  notificationSettings: NotificationSettingsResponse;
 }
 
 export interface AuthResponse {

@@ -97,6 +97,18 @@ export class User extends Document {
   @Prop({ type: Number, default: 0 })
   followingCount!: number;
 
+  /**
+   * Internal coordination version for social-graph transactions.
+   * Không expose qua API.
+   */
+  @Prop({
+    type: Number,
+    default: 0,
+    min: 0,
+    select: false,
+  })
+  socialGraphVersion!: number;
+
   // Số lần đăng nhập sai liên tiếp. Không trả field này qua API mặc định.
   @Prop({
     type: Number,

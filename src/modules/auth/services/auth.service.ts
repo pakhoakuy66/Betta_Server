@@ -20,6 +20,7 @@ import {
   DEFAULT_AVATAR_ID,
   DEFAULT_NOTIFICATION_SETTINGS,
   User,
+  type NotificationSettings,
 } from '../../users/schemas/user.schema';
 import {
   RegisterDto,
@@ -31,6 +32,7 @@ import {
 } from '../dto/auth.dto';
 import {
   AuthResponse,
+  PublicUser,
   RegisterResponse,
   TokenPayload,
 } from '../interfaces/auth.interface';
@@ -123,9 +125,20 @@ export class AuthService {
     return bcrypt.compare(refreshToken, refreshTokenHash);
   }
 
-  private toPublicUser(user: User) {
+  private normalizeNotificationSettings(
+    settings?: Partial<NotificationSettings> | null,
+  ): NotificationSettings {
     return {
-      id: user._id.toString(),
+      enabled: settings?.enabled ?? DEFAULT_NOTIFICATION_SETTINGS.enabled,
+      follow: settings?.follow ?? DEFAULT_NOTIFICATION_SETTINGS.follow,
+      reaction: settings?.reaction ?? DEFAULT_NOTIFICATION_SETTINGS.reaction,
+      recap: settings?.recap ?? DEFAULT_NOTIFICATION_SETTINGS.recap,
+    };
+  }
+
+  private toPublicUser(user: User): PublicUser {
+    return {
+      id: user.publicId,
       publicId: user.publicId,
       username: user.username,
       fullname: user.fullname,
@@ -135,10 +148,9 @@ export class AuthService {
       hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
       streakCount: user.streakCount ?? 0,
       status: user.status ?? 'active',
-      notificationSettings: {
-        ...DEFAULT_NOTIFICATION_SETTINGS,
-        ...(user.notificationSettings ?? {}),
-      },
+      notificationSettings: this.normalizeNotificationSettings(
+        user.notificationSettings,
+      ),
     };
   }
 
@@ -524,7 +536,7 @@ export class AuthService {
     };
   }
 
-  async getCurrentUser(userId: string) {
+  async getCurrentUser(userId: string): Promise<PublicUser> {
     const user = await this.userModel
       .findOne({
         _id: userId,

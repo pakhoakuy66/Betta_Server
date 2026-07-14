@@ -5,12 +5,12 @@ export interface UserProfileResponse {
   fullname: string;
   avatar: string;
   hasCustomAvatar: boolean;
-  bio?: string;
-  link?: string;
-  followersCount?: number;
-  followingCount?: number;
-  postsCount?: number;
-  streakCount?: number;
-  isFollowing?: boolean;
-  isBlocked?: boolean;
+  bio: string;
+  link: string;
+  followersCount: number;
+  followingCount: number;
+  postsCount: number;
+  streakCount: number;
+  isFollowing: boolean;
+  isBlocked: boolean;
 }

@@ -70,6 +70,37 @@ type SuggestedUserResult = {
   followersCount: number;
 };
 
+type PublicProfileUser = {
+  _id: Types.ObjectId;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string;
+  avatarId: string;
+  bio?: string;
+  link?: string;
+  streakCount?: number;
+  postsCount?: number;
+};
+
+type CurrentUserResponseSource = {
+  publicId: string;
+  username: string;
+  fullname: string;
+  email: string;
+  phone: string;
+  avatar?: string | null;
+  avatarId?: string | null;
+  bio?: string | null;
+  link?: string | null;
+  streakCount?: number;
+  postsCount?: number;
+  followersCount?: number;
+  followingCount?: number;
+  status?: string;
+  notificationSettings?: Partial<NotificationSettings> | null;
+};
+
 type SuggestedUserResponse = {
   id: string;
   publicId: string;
@@ -260,7 +291,7 @@ export class UsersService {
     return {
       success: true,
       data: items.map((user) => ({
-        id: user._id.toString(),
+        id: user.publicId,
         publicId: user.publicId,
         username: user.username,
         fullname: user.fullname,
@@ -361,11 +392,15 @@ export class UsersService {
     currentUserId?: string,
   ): Promise<{ success: boolean; data: UserProfileResponse }> {
     const user = await this.userModel
-      .findOne({ username, isDeleted: false })
+      .findOne({
+        username,
+        isDeleted: false,
+        status: 'active',
+      })
       .select(
-        '-password -forgotPasswordOtp -forgotPasswordExpiry -refreshToken -isDeleted -deletedAt -notificationSettings',
-      ) // Ẩn triệt để thông tin mật
-      .lean()
+        '_id publicId username fullname avatar avatarId bio link streakCount postsCount',
+      )
+      .lean<PublicProfileUser>()
       .exec();
 
     if (!user) {
@@ -375,25 +410,38 @@ export class UsersService {
     let isFollowing = false;
 
     if (currentUserId) {
+      if (!Types.ObjectId.isValid(currentUserId)) {
+        throw new NotFoundException('Không tìm thấy người dùng này');
+      }
+
       const currentId = new Types.ObjectId(currentUserId);
       const targetId = user._id;
-      // KIỂM TRA CHẶN 2 CHIỀU
-      const blockRecord = await this.blockModel.findOne({
-        $or: [
-          { blockerId: currentId, blockedId: targetId },
-          { blockerId: targetId, blockedId: currentId },
-        ],
-      });
+
+      const blockRecord = await this.blockModel
+        .findOne({
+          $or: [
+            { blockerId: currentId, blockedId: targetId },
+            { blockerId: targetId, blockedId: currentId },
+          ],
+        })
+        .select('_id')
+        .lean()
+        .exec();
 
       if (blockRecord) {
         throw new NotFoundException('Không tìm thấy người dùng này');
       }
-      // Kiểm tra follow (Chỉ chạy khi không bị chặn)
-      const followRecord = await this.relationshipModel.findOne({
-        followerId: currentId,
-        followingId: targetId,
-      });
-      isFollowing = !!followRecord;
+
+      const followRecord = await this.relationshipModel
+        .findOne({
+          followerId: currentId,
+          followingId: targetId,
+        })
+        .select('_id')
+        .lean()
+        .exec();
+
+      isFollowing = Boolean(followRecord);
     }
 
     const [realFollowersCount, realFollowingCount] = await Promise.all([
@@ -401,20 +449,47 @@ export class UsersService {
       this.countActiveFollowing(user._id),
     ]);
 
-    // Nếu không bị chặn, trả về Full Profile (Map _id thành id)
-    const { _id, avatarId, ...rest } = user;
-
     return {
       success: true,
       data: {
-        id: _id.toString(),
-        isFollowing,
-        isBlocked: false,
-        ...rest,
-        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
+        id: user.publicId,
+        publicId: user.publicId,
+        username: user.username,
+        fullname: user.fullname,
+        avatar: user.avatar,
+        hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
+        bio: user.bio ?? '',
+        link: user.link ?? '',
+        streakCount: user.streakCount ?? 0,
+        postsCount: user.postsCount ?? 0,
         followersCount: realFollowersCount,
         followingCount: realFollowingCount,
+        isFollowing,
+        isBlocked: false,
       },
+    };
+  }
+
+  private toCurrentUserResponse(user: CurrentUserResponseSource) {
+    return {
+      id: user.publicId,
+      publicId: user.publicId,
+      username: user.username,
+      fullname: user.fullname,
+      email: user.email,
+      phone: user.phone,
+      avatar: user.avatar ?? null,
+      hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
+      bio: user.bio ?? '',
+      link: user.link ?? '',
+      streakCount: user.streakCount ?? 0,
+      postsCount: user.postsCount ?? 0,
+      followersCount: user.followersCount ?? 0,
+      followingCount: user.followingCount ?? 0,
+      status: user.status ?? 'active',
+      notificationSettings: this.normalizeNotificationSettings(
+        user.notificationSettings,
+      ),
     };
   }
 
@@ -482,16 +557,10 @@ export class UsersService {
       throw new BadRequestException('Không thể cập nhật hồ sơ');
     }
 
-    const { _id, avatarId, ...rest } = updatedUser;
-
     return {
       success: true,
-      message: 'Cập nhật hồ sơ thành công',
-      data: {
-        id: _id.toString(),
-        ...rest,
-        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
-      },
+      message: 'Cập nhật thông tin thành công',
+      data: this.toCurrentUserResponse(updatedUser),
     };
   }
 
@@ -564,16 +633,10 @@ export class UsersService {
       }
     }
 
-    const { _id, avatarId, ...rest } = updatedUser;
-
     return {
       success: true,
-      message: 'Cập nhật avatar thành công',
-      data: {
-        id: _id.toString(),
-        ...rest,
-        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
-      },
+      message: 'Cập nhật thông tin thành công',
+      data: this.toCurrentUserResponse(updatedUser),
     };
   }
 
@@ -597,16 +660,10 @@ export class UsersService {
     }
 
     if (currentUser.avatarId === DEFAULT_AVATAR_ID) {
-      const { _id, avatarId, ...rest } = currentUser;
-
       return {
         success: true,
         message: 'Avatar đang là ảnh mặc định',
-        data: {
-          id: _id.toString(),
-          ...rest,
-          hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
-        },
+        data: this.toCurrentUserResponse(currentUser),
       };
     }
 
@@ -651,16 +708,10 @@ export class UsersService {
       }
     }
 
-    const { _id, avatarId, ...rest } = updatedUser;
-
     return {
       success: true,
       message: 'Đã xóa avatar',
-      data: {
-        id: _id.toString(),
-        ...rest,
-        hasCustomAvatar: avatarId !== DEFAULT_AVATAR_ID,
-      },
+      data: this.toCurrentUserResponse(updatedUser),
     };
   }
 
