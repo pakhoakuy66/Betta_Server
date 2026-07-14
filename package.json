@@ -7,6 +7,11 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
+    "recap:catch-up": "ts-node -r tsconfig-paths/register src/scripts/run-weekly-recap-catch-up.ts",
+    "cleanup:dry-run": "node -r ts-node/register -r tsconfig-paths/register src/scripts/cleanup-retention.ts",
+    "cleanup:run": "node -r ts-node/register -r tsconfig-paths/register src/scripts/cleanup-retention.ts --execute",
+    "reactions:cleanup": "node -r ts-node/register -r tsconfig-paths/register src/scripts/cleanup-reactions.ts",
+    "reactions:cleanup:run": "node -r ts-node/register -r tsconfig-paths/register src/scripts/cleanup-reactions.ts --execute",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "dev": "nest start --watch",

@@ -12,6 +12,15 @@ import {
   RelationshipSchema,
 } from '../relationshipModule/schemas/relationship.schema';
 import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
+import {
+  WeeklyRecapRun,
+  WeeklyRecapRunSchema,
+} from '../recap/schemas/weekly-recap-run.schema';
+import {
+  ReactionCleanupCursor,
+  ReactionCleanupCursorSchema,
+} from './schemas/reaction-cleanup-cursor.schema';
+import { ReactionCleanupService } from './services/reaction-cleanup.service';
 
 @Module({
   imports: [
@@ -23,9 +32,18 @@ import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
       { name: User.name, schema: UserSchema },
       { name: Relationship.name, schema: RelationshipSchema },
       { name: Block.name, schema: BlockSchema },
+      {
+        name: WeeklyRecapRun.name,
+        schema: WeeklyRecapRunSchema,
+      },
+      {
+        name: ReactionCleanupCursor.name,
+        schema: ReactionCleanupCursorSchema,
+      },
     ]),
   ],
   controllers: [ReactionController],
-  providers: [ReactionService],
+  providers: [ReactionService, ReactionCleanupService],
+  exports: [ReactionCleanupService],
 })
 export class ReactionModule {}

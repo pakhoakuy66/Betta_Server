@@ -32,3 +32,4 @@ ReactionSchema.index({ userId: 1, postId: 1 }, { unique: true });
 // Index để thống kê Recap cho chủ bài viết
 ReactionSchema.index({ postOwnerId: 1, createdAt: -1 });
 ReactionSchema.index({ postId: 1, createdAt: -1 });
+ReactionSchema.index({ createdAt: 1, _id: 1 });
