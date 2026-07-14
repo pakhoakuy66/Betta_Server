@@ -68,6 +68,8 @@ export class Post extends Document {
   // expireAt dùng để ẩn post khỏi query và cho cron job cleanup tài nguyên.
   @Prop({
     type: Date,
+    required: true,
+    immutable: true,
     default: () => new Date(Date.now() + 24 * 60 * 60 * 1000),
     index: true,
   })

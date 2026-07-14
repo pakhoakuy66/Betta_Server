@@ -49,6 +49,29 @@ type PostAuthor = {
   streakCount: number;
 };
 
+type PublicPostAuthor = {
+  id: string;
+  publicId: string;
+  username: string;
+  fullname: string;
+  avatar: string | null;
+  streakCount: number;
+};
+
+type PublicPostResponse = {
+  id: string;
+  publicId: string;
+  content: string;
+  images: { url: string; publicId: string }[];
+  likeCount: number;
+  shareCount: number;
+  isReacted?: boolean;
+  expireAt: Date;
+  createdAt: Date;
+  updatedAt?: Date;
+  author?: PublicPostAuthor | null;
+};
+
 type PostListItem = {
   _id: Types.ObjectId;
   publicId: string;
@@ -870,6 +893,17 @@ export class PostsService {
     return { currentObjectId, post };
   }
 
+  private toPublicPostAuthor(author: PostAuthor): PublicPostAuthor {
+    return {
+      id: author.publicId,
+      publicId: author.publicId,
+      username: author.username,
+      fullname: author.fullname,
+      avatar: author.avatar ?? null,
+      streakCount: author.streakCount ?? 0,
+    };
+  }
+
   private toPostResponse(post: Post) {
     return {
       id: post.publicId,
@@ -882,7 +916,6 @@ export class PostsService {
       likeCount: post.likeCount,
       shareCount: post.shareCount,
       expireAt: post.expireAt,
-      isDeletedByAdmin: post.isDeletedByAdmin,
       createdAt: post.get('createdAt') as Date,
       updatedAt: post.get('updatedAt') as Date,
     };
@@ -924,7 +957,7 @@ export class PostsService {
     post: PostListItem,
     authorMap: Map<string, PostAuthor>,
     reactedPostIds: Set<string>,
-  ) {
+  ): PublicPostResponse {
     const author = authorMap.get(post.authorId.toString());
 
     return {
@@ -940,16 +973,7 @@ export class PostsService {
       isReacted: reactedPostIds.has(post._id.toString()),
       expireAt: post.expireAt,
       createdAt: post.createdAt,
-      author: author
-        ? {
-            id: author._id.toString(),
-            publicId: author.publicId,
-            username: author.username,
-            fullname: author.fullname,
-            avatar: author.avatar ?? null,
-            streakCount: author.streakCount ?? 0,
-          }
-        : null,
+      author: author ? this.toPublicPostAuthor(author) : null,
     };
   }
 
@@ -957,7 +981,7 @@ export class PostsService {
     post: Post,
     author: PostAuthor,
     reactedPostIds: Set<string>,
-  ) {
+  ): PublicPostResponse {
     return {
       id: post.publicId,
       publicId: post.publicId,
@@ -972,14 +996,7 @@ export class PostsService {
       expireAt: post.expireAt,
       createdAt: post.get('createdAt') as Date,
       updatedAt: post.get('updatedAt') as Date,
-      author: {
-        id: author._id.toString(),
-        publicId: author.publicId,
-        username: author.username,
-        fullname: author.fullname,
-        avatar: author.avatar,
-        streakCount: author.streakCount,
-      },
+      author: this.toPublicPostAuthor(author),
     };
   }
 
