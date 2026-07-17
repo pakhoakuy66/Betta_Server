@@ -1,7 +1,6 @@
 import {
   Injectable,
   ConflictException,
-  NotFoundException,
   UnauthorizedException,
   BadRequestException,
   InternalServerErrorException,
@@ -9,12 +8,14 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+
+import { Connection, Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { MailService } from './mail.service';
+import { AuthSessionService } from './auth-session.service';
+import type { SessionRequestMetadata } from '../interfaces/auth-session.interface';
 import { generateUserPublicId } from '../../users/utils/generate-public-id';
 import {
   DEFAULT_AVATAR_ID,
@@ -22,6 +23,7 @@ import {
   User,
   type NotificationSettings,
 } from '../../users/schemas/user.schema';
+import { SessionRevokeReason } from '../schemas/auth-session.schema';
 import {
   RegisterDto,
   LoginDto,
@@ -34,14 +36,12 @@ import {
   AuthResponse,
   PublicUser,
   RegisterResponse,
-  TokenPayload,
 } from '../interfaces/auth.interface';
 
 // ─────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────
 const BCRYPT_ROUNDS = 12;
-const REFRESH_TOKEN_HASH_ROUNDS = 10;
 const OTP_HASH_ROUNDS = 8;
 const MAX_OTP_VERIFY_ATTEMPTS = 5;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
@@ -57,10 +57,6 @@ const INVALID_LOGIN_MESSAGE = 'Email hoặc mật khẩu không chính xác';
 // Hash giả có cùng bcrypt cost với mật khẩu thật để hạn chế dò email bằng timing.
 const DUMMY_PASSWORD_HASH =
   '$2b$12$CwTycUXWue0Thq9StjUM0uJ8xgOguJdyQh7fXxH4ILhYo8sHpItCu';
-
-type RefreshTokenPayload = {
-  sub: string;
-};
 
 // ─────────────────────────────────────────────
 // Helper: ép kiểu err unknown → MongoError shape
@@ -89,41 +85,20 @@ export class AuthService {
   private readonly OTP_EXPIRY_MINUTES = 3; // OTP hết hạn sau 3 phút
 
   constructor(
-    @InjectModel(User.name) private readonly userModel: Model<User>,
-    private readonly jwtService: JwtService,
+    @InjectConnection()
+    private readonly connection: Connection,
+
+    @InjectModel(User.name)
+    private readonly userModel: Model<User>,
+
     private readonly mailService: MailService,
+
+    private readonly authSessionService: AuthSessionService,
   ) {}
 
   // ─────────────────────────────────────────────
   // PRIVATE HELPERS
   // ─────────────────────────────────────────────
-
-  private generateToken(user: User): string {
-    const payload: TokenPayload = {
-      sub: String(user._id),
-      email: user.email,
-      username: user.username,
-    };
-    // Access Token sống siêu ngắn (15 phút)
-    return this.jwtService.sign(payload, { expiresIn: '15m' });
-  }
-
-  private generateRefreshToken(user: User): string {
-    return this.jwtService.sign({ sub: String(user._id) }, { expiresIn: '7d' });
-  }
-
-  private async hashRefreshToken(refreshToken: string): Promise<string> {
-    return bcrypt.hash(refreshToken, REFRESH_TOKEN_HASH_ROUNDS);
-  }
-
-  private async isRefreshTokenMatched(
-    refreshToken: string,
-    refreshTokenHash?: string | null,
-  ): Promise<boolean> {
-    if (!refreshTokenHash) return false;
-
-    return bcrypt.compare(refreshToken, refreshTokenHash);
-  }
 
   private normalizeNotificationSettings(
     settings?: Partial<NotificationSettings> | null,
@@ -431,7 +406,10 @@ export class AuthService {
   // LOGIN
   // ─────────────────────────────────────────────
 
-  async login(body: LoginDto): Promise<AuthResponse> {
+  async login(
+    body: LoginDto,
+    metadata: SessionRequestMetadata,
+  ): Promise<AuthResponse> {
     const email = body.email.trim().toLowerCase();
     const password = body.password;
     const now = new Date();
@@ -477,41 +455,73 @@ export class AuthService {
 
     this.ensureAccountCanUseAuth(user);
 
-    const accessToken = this.generateToken(user);
-    const refreshToken = this.generateRefreshToken(user);
-    const refreshTokenHash = await this.hashRefreshToken(refreshToken);
-
     /*
-     * Chỉ cấp phiên nếu tài khoản vẫn chưa bị khóa/xóa trong thời gian
-     * bcrypt đang chạy. Đồng thời reset counter và lưu refresh-token hash.
+     * Chỉ cấp phiên nếu tài khoản vẫn chưa bị khóa hoặc xóa trong thời gian
+     * bcrypt đang chạy. Đồng thời reset bộ đếm đăng nhập thất bại.
+     * Refresh-token hash được lưu riêng trong auth_sessions khi tạo session.
      */
-    const authenticatedUser = await this.userModel
-      .findOneAndUpdate(
-        {
-          _id: user._id,
-          isDeleted: false,
-          status: { $ne: 'banned' },
-          $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
-        },
-        {
-          $set: {
-            refreshToken: refreshTokenHash,
-            failedLoginAttempts: 0,
+    const loginResult = await this.connection.transaction(async (session) => {
+      /*
+       * Khóa credential state đã được bcrypt xác minh.
+       * Nếu password thay đổi trong lúc bcrypt chạy,
+       * query không match và không tạo session.
+       */
+      const authenticatedUser = await this.userModel
+        .findOneAndUpdate(
+          {
+            _id: user._id,
+            password: user.password,
+            isDeleted: false,
+            status: 'active',
+            $or: [
+              { lockedUntil: null },
+              {
+                lockedUntil: {
+                  $lte: now,
+                },
+              },
+            ],
           },
-          $unset: {
-            lockedUntil: '',
-            failedLoginWindowStartedAt: '',
+          {
+            $set: {
+              failedLoginAttempts: 0,
+            },
+            $unset: {
+              lockedUntil: '',
+              failedLoginWindowStartedAt: '',
+            },
           },
-        },
-        {
-          new: true,
-          runValidators: true,
-        },
-      )
-      .select('+password')
-      .exec();
+          {
+            session,
+            returnDocument: 'after',
+            runValidators: true,
+          },
+        )
+        .select('+password')
+        .exec();
 
-    if (!authenticatedUser) {
+      if (!authenticatedUser) {
+        return null;
+      }
+
+      /*
+       * User CAS và auth_session insert cùng transaction.
+       * Không còn khoảng trống để session dùng password cũ
+       * được tạo sau password-change revoke-all.
+       */
+      const tokens = await this.authSessionService.createSession(
+        authenticatedUser,
+        metadata,
+        session,
+      );
+
+      return {
+        authenticatedUser,
+        tokens,
+      };
+    });
+
+    if (!loginResult) {
       const latestUser = await this.userModel
         .findById(user._id)
         .select('+lockedUntil')
@@ -526,12 +536,13 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
+    const { authenticatedUser, tokens } = loginResult;
+
     this.logger.log(`User logged in: ${authenticatedUser._id.toString()}`);
 
     return {
       message: 'Đăng nhập thành công',
-      access_token: accessToken,
-      refresh_token: refreshToken,
+      ...tokens,
       user: this.toPublicUser(authenticatedUser),
     };
   }
@@ -676,7 +687,10 @@ export class AuthService {
   // BƯỚC 3: Đổi mật khẩu mới
   async resetPassword(body: ResetPasswordDto) {
     const email = body.email.trim().toLowerCase();
+
     const { otp, newPassword } = body;
+
+    const now = new Date();
 
     const user = await this.userModel
       .findOne({
@@ -695,13 +709,14 @@ export class AuthService {
           '+lockedUntil',
           '+refreshToken',
         ].join(' '),
-      );
+      )
+      .exec();
 
-    // Kiểm tra user & Kiểm tra thời hạn OTP (3 phút như ông đã set)
     if (
       !user ||
+      !user.forgotPasswordOtp ||
       !user.forgotPasswordExpiry ||
-      user.forgotPasswordExpiry < new Date()
+      user.forgotPasswordExpiry <= now
     ) {
       throw new BadRequestException('OTP không hợp lệ hoặc đã hết hạn');
     }
@@ -718,46 +733,102 @@ export class AuthService {
       );
     }
 
-    const isOtpValid = await this.isOtpMatched(otp, user.forgotPasswordOtp);
+    const expectedOtpHash = user.forgotPasswordOtp;
+
+    const expectedPasswordHash = user.password;
+
+    const isOtpValid = await this.isOtpMatched(otp, expectedOtpHash);
 
     if (!isOtpValid) {
       user.forgotPasswordAttempts = (user.forgotPasswordAttempts ?? 0) + 1;
+
       await user.save();
 
       throw new BadRequestException('OTP không hợp lệ');
     }
 
-    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+    const isSamePassword = await bcrypt.compare(
+      newPassword,
+      expectedPasswordHash,
+    );
 
     if (isSamePassword) {
-      /*
-       * OTP đã đúng nhưng mật khẩu mới không hợp lệ về mặt nghiệp vụ.
-       * Không xóa OTP ở nhánh này để user có thể nhập mật khẩu khác
-       * trong thời gian OTP còn hiệu lực.
-       */
       throw new BadRequestException(
         'Mật khẩu mới không được trùng với mật khẩu hiện tại',
       );
     }
 
-    user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    const newPasswordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
-    // Xóa dấu vết OTP sau khi đổi thành công
-    user.forgotPasswordOtp = undefined;
-    user.forgotPasswordExpiry = undefined;
-    user.forgotPasswordAttempts = 0;
+    const userId = new Types.ObjectId(user._id.toString());
 
-    // Reset trạng thái khóa vì user đã chứng minh quyền sở hữu qua OTP.
-    user.failedLoginAttempts = 0;
-    user.failedLoginWindowStartedAt = undefined;
-    user.lockedUntil = undefined;
+    await this.connection.transaction(async (session) => {
+      const transactionNow = new Date();
 
-    // Thu hồi mọi phiên cũ sau khi thay đổi mật khẩu.
-    user.refreshToken = null;
+      const updateResult = await this.userModel
+        .updateOne(
+          {
+            _id: userId,
+            password: expectedPasswordHash,
+            forgotPasswordOtp: expectedOtpHash,
+            forgotPasswordExpiry: {
+              $gt: transactionNow,
+            },
+            isDeleted: false,
+            status: 'active',
+            $or: [
+              {
+                forgotPasswordAttempts: {
+                  $lt: MAX_OTP_VERIFY_ATTEMPTS,
+                },
+              },
+              {
+                forgotPasswordAttempts: {
+                  $exists: false,
+                },
+              },
+            ],
+          },
+          {
+            $set: {
+              password: newPasswordHash,
+              refreshToken: null,
+              forgotPasswordAttempts: 0,
+              failedLoginAttempts: 0,
+            },
+            $unset: {
+              forgotPasswordOtp: '',
+              forgotPasswordExpiry: '',
+              failedLoginWindowStartedAt: '',
+              lockedUntil: '',
+            },
+          },
+          {
+            session,
+            runValidators: true,
+          },
+        )
+        .exec();
 
-    await user.save();
+      if (updateResult.matchedCount !== 1) {
+        throw new BadRequestException(
+          'OTP hoặc trạng thái xác thực đã thay đổi, vui lòng thử lại',
+        );
+      }
 
-    return { success: true, message: 'Đổi mật khẩu thành công!' };
+      await this.authSessionService.revokeAllSessions(
+        userId,
+        SessionRevokeReason.PASSWORD_RESET,
+        session,
+      );
+    });
+
+    this.logger.log(`User reset password: ${userId.toString()}`);
+
+    return {
+      success: true,
+      message: 'Đổi mật khẩu thành công!',
+    };
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto) {
@@ -767,9 +838,15 @@ export class AuthService {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
 
+    if (!Types.ObjectId.isValid(userId)) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ');
+    }
+
+    const uid = new Types.ObjectId(userId);
+
     const user = await this.userModel
       .findOne({
-        _id: userId,
+        _id: uid,
         isDeleted: false,
         status: 'active',
       })
@@ -782,16 +859,21 @@ export class AuthService {
       );
     }
 
+    const expectedPasswordHash = user.password;
+
     const isCurrentPasswordValid = await bcrypt.compare(
       currentPassword,
-      user.password,
+      expectedPasswordHash,
     );
 
     if (!isCurrentPasswordValid) {
       throw new UnauthorizedException('Mật khẩu hiện tại không chính xác');
     }
 
-    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+    const isSamePassword = await bcrypt.compare(
+      newPassword,
+      expectedPasswordHash,
+    );
 
     if (isSamePassword) {
       throw new BadRequestException(
@@ -799,18 +881,44 @@ export class AuthService {
       );
     }
 
-    user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    const newPasswordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
-    /*
-     * Thu hồi refresh token sau khi đổi mật khẩu.
-     * Access token hiện tại vẫn có thể sống đến khi hết hạn ngắn 15 phút,
-     * FE cần xóa token local và yêu cầu đăng nhập lại sau response thành công.
-     */
-    user.refreshToken = null;
+    await this.connection.transaction(async (session) => {
+      const updateResult = await this.userModel
+        .updateOne(
+          {
+            _id: uid,
+            password: expectedPasswordHash,
+            isDeleted: false,
+            status: 'active',
+          },
+          {
+            $set: {
+              password: newPasswordHash,
+              refreshToken: null,
+            },
+          },
+          {
+            session,
+            runValidators: true,
+          },
+        )
+        .exec();
 
-    await user.save();
+      if (updateResult.matchedCount !== 1) {
+        throw new UnauthorizedException(
+          'Thông tin xác thực đã thay đổi, vui lòng thử lại',
+        );
+      }
 
-    this.logger.log(`User changed password: ${user._id.toString()}`);
+      await this.authSessionService.revokeAllSessions(
+        uid,
+        SessionRevokeReason.PASSWORD_CHANGED,
+        session,
+      );
+    });
+
+    this.logger.log(`User changed password: ${uid.toString()}`);
 
     return {
       success: true,
@@ -818,82 +926,23 @@ export class AuthService {
     };
   }
 
-  async logout(userId: string) {
-    try {
-      // 1. Kiểm tra User có tồn tại không (Phòng trường hợp User bị xóa lúc đang đăng nhập)
-      const user = await this.userModel
-        .findById(userId)
-        .select('+refreshToken');
-
-      if (!user) {
-        throw new NotFoundException('Người dùng không tồn tại');
-      }
-
-      // Clear refresh token
-      user.refreshToken = null;
-      await user.save();
-
-      return {
-        success: true,
-        message: 'Đăng xuất thành công!',
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-
-      throw new InternalServerErrorException(
-        'Có lỗi xảy ra trong quá trình xử lý đăng xuất',
-      );
+  async logout(userId: string, sessionId: string) {
+    if (!Types.ObjectId.isValid(userId)) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ');
     }
+
+    await this.authSessionService.revokeCurrentSession(
+      new Types.ObjectId(userId),
+      sessionId,
+    );
+
+    return {
+      success: true,
+      message: 'Đăng xuất thành công!',
+    };
   }
 
-  // LÀM MỚI TOKEN
-  async refreshToken(refreshToken: string) {
-    try {
-      // 1. Verify xem token còn hạn không
-      const decoded = this.jwtService.verify<RefreshTokenPayload>(refreshToken);
-
-      // 2. Tìm user và check xem token có khớp DB không (Chống thu hồi)
-      const user = await this.userModel
-        .findById(decoded.sub)
-        .select('+refreshToken')
-        .exec();
-
-      const isTokenMatched = await this.isRefreshTokenMatched(
-        refreshToken,
-        user?.refreshToken,
-      );
-
-      if (!user || !isTokenMatched) {
-        throw new UnauthorizedException(
-          'Refresh token không hợp lệ hoặc đã bị thu hồi',
-        );
-      }
-
-      this.ensureAccountCanUseAuth(user);
-
-      // 3. Cấp cặp token mới để liên tục cuốn chiếu (Refresh Token Rotation)
-      const new_access_token = this.generateToken(user);
-      const new_refresh_token = this.generateRefreshToken(user);
-
-      // 4. Update DB
-      user.refreshToken = await this.hashRefreshToken(new_refresh_token);
-      await user.save();
-
-      return {
-        access_token: new_access_token,
-        refresh_token: new_refresh_token,
-      };
-    } catch (err: unknown) {
-      if (err instanceof UnauthorizedException) throw err;
-
-      this.logger.warn(
-        'Refresh token failed',
-        err instanceof Error ? err.message : String(err),
-      );
-      throw new UnauthorizedException(
-        'Refresh token không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.',
-      );
-    }
+  refreshToken(refreshToken: string) {
+    return this.authSessionService.rotateRefreshToken(refreshToken);
   }
 }

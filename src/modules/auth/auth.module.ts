@@ -6,8 +6,11 @@ import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './services/auth.service';
 import { MailService } from './services/mail.service';
+import { AuthSessionService } from './services/auth-session.service';
 import { AuthController } from './controllers/auth.controller';
+import { AuthSessionsController } from './controllers/auth-sessions.controller';
 import { User, UserSchema } from '../users/schemas/user.schema'; // Đảm bảo đúng đường dẫn
+import { AuthSession, AuthSessionSchema } from './schemas/auth-session.schema';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import {
   AuthRateLimit,
@@ -21,6 +24,10 @@ import { AuthRateLimitService } from './services/auth-rate-limit.service';
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: AuthRateLimit.name, schema: AuthRateLimitSchema },
+      {
+        name: AuthSession.name,
+        schema: AuthSessionSchema,
+      },
     ]),
     PassportModule,
     // Cấu hình JwtModule động từ file .env
@@ -33,7 +40,13 @@ import { AuthRateLimitService } from './services/auth-rate-limit.service';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AuthController],
-  providers: [AuthService, AuthRateLimitService, JwtStrategy, MailService],
+  controllers: [AuthController, AuthSessionsController],
+  providers: [
+    AuthService,
+    AuthSessionService,
+    AuthRateLimitService,
+    JwtStrategy,
+    MailService,
+  ],
 })
 export class AuthModule {}
