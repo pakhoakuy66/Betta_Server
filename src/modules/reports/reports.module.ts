@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ReportsService } from './services/reports.service';
 import { ReportRateLimitService } from './services/report-rate-limit.service';
@@ -26,7 +25,6 @@ import {
 import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 import { UploadsModule } from '../uploads/uploads.module';
 import { ReportIssueUploadRateLimitGuard } from './guards/report-issue-upload-rate-limit.guard';
-import { ReportRateLimitExceptionFilter } from './filters/report-rate-limit-exception.filter';
 import { ReportStatusTransitionService } from './services/report-status-transition.service';
 
 @Module({
@@ -48,10 +46,6 @@ import { ReportStatusTransitionService } from './services/report-status-transiti
     ReportRateLimitService,
     ReportIssueUploadRateLimitGuard,
     ReportStatusTransitionService,
-    {
-      provide: APP_FILTER,
-      useClass: ReportRateLimitExceptionFilter,
-    },
   ],
   controllers: [ReportsController],
   exports: [ReportStatusTransitionService],
