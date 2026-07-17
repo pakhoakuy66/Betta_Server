@@ -88,7 +88,25 @@ export class UploadsService {
       throw new BadRequestException('Bài viết chỉ được phép có tối đa 3 ảnh');
     }
 
-    return Promise.all(files.map((file) => this.uploadPostImage(file)));
+    const results = await Promise.allSettled(
+      files.map((file) => this.uploadPostImage(file)),
+    );
+
+    const uploadedImages = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+
+    const failedResult = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    if (!failedResult) {
+      return uploadedImages;
+    }
+
+    await this.deleteImages(uploadedImages.map((image) => image.publicId));
+
+    throw failedResult.reason;
   }
 
   async uploadAvatar(file: UploadFile): Promise<UploadedImage> {
