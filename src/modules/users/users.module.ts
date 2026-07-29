@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { UsersService } from './services/users.service';
 import { UsersController } from './controllers/users.controller';
 import { UploadsModule } from '../uploads/uploads.module';
+import { AuthModule } from '../auth/auth.module';
 import { User, UserSchema } from './schemas/user.schema';
 import {
   Relationship,
@@ -33,6 +34,7 @@ import {
 @Module({
   imports: [
     UploadsModule,
+    AuthModule,
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: Relationship.name, schema: RelationshipSchema },

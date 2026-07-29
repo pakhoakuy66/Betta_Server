@@ -6,7 +6,7 @@ import {
 import type { Server } from 'node:http';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { getModelToken } from '@nestjs/mongoose';
+import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -17,6 +17,7 @@ import {
   describe,
   expect,
   it,
+  jest,
 } from '@jest/globals';
 import { Connection, createConnection, type Model, Types } from 'mongoose';
 import request from 'supertest';
@@ -30,6 +31,11 @@ import {
 import { AuthSessionsController } from '../../src/modules/auth/controllers/auth-sessions.controller';
 import type { AccessTokenPayload } from '../../src/modules/auth/interfaces/auth-session.interface';
 import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../../src/modules/auth/interfaces/auth-audit.interface';
+import {
   AuthSession,
   AuthSessionSchema,
   SessionRevokeReason,
@@ -38,8 +44,13 @@ import {
   AuthSessionService,
   type AuthTokenPair,
 } from '../../src/modules/auth/services/auth-session.service';
+import { AuthAuditService } from '../../src/modules/auth/services/auth-audit.service';
 import { JwtStrategy } from '../../src/modules/auth/strategies/jwt.strategy';
 import { User, UserSchema } from '../../src/modules/users/schemas/user.schema';
+import {
+  AuthAuditEvent,
+  AuthAuditEventSchema,
+} from '../../src/modules/auth/schemas/auth-audit-event.schema';
 
 const URI_ENV = 'MONGODB_INTEGRATION_URI';
 const CONFIRMATION_ENV = 'RUN_MONGODB_INTEGRATION_TESTS';
@@ -59,6 +70,7 @@ const configService = {
       JWT_ACCESS_TTL_SECONDS: 900,
       JWT_REFRESH_TTL_SECONDS: 604800,
       REFRESH_TOKEN_HASH_ROUNDS: 8,
+      AUTH_AUDIT_RETENTION_DAYS: 180,
     })[key],
 } as ConfigService;
 
@@ -96,6 +108,8 @@ type ErrorBody = {
 
 const parseBody = <T>(text: string): T => JSON.parse(text) as T;
 
+type AuditInsertManyMethod = (...args: unknown[]) => Promise<unknown>;
+
 jest.setTimeout(120_000);
 
 if (Buffer.byteLength(databaseName, 'utf8') > MAX_DATABASE_NAME_BYTES) {
@@ -110,11 +124,25 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
   let connection: Connection;
   let userModel: Model<User>;
   let sessionModel: Model<AuthSession>;
+  let auditModel: Model<AuthAuditEvent>;
   let jwtService: JwtService;
   let sessionService: AuthSessionService;
   let app: INestApplication;
   let httpServer: Server;
   let sequence = 0;
+
+  const createAuditInsertSpy = () =>
+    jest.spyOn(
+      auditModel as unknown as {
+        insertMany: AuditInsertManyMethod;
+      },
+      'insertMany',
+    );
+
+  const createAuditFailure = (): Error =>
+    Object.assign(new Error('Audit persistence failed'), {
+      name: 'MongoServerSelectionError',
+    });
 
   const createUser = async (label: string): Promise<User> => {
     sequence += 1;
@@ -188,7 +216,16 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
       AuthSessionSchema,
     );
 
-    await Promise.all([userModel.syncIndexes(), sessionModel.syncIndexes()]);
+    auditModel = connection.model<AuthAuditEvent>(
+      AuthAuditEvent.name,
+      AuthAuditEventSchema,
+    );
+
+    await Promise.all([
+      userModel.syncIndexes(),
+      sessionModel.syncIndexes(),
+      auditModel.syncIndexes(),
+    ]);
 
     const moduleRef = await Test.createTestingModule({
       imports: [PassportModule.register({ defaultStrategy: 'jwt' })],
@@ -197,9 +234,18 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
         JwtService,
         AuthSessionService,
         JwtStrategy,
+        AuthAuditService,
         { provide: ConfigService, useValue: configService },
         { provide: getModelToken(User.name), useValue: userModel },
         { provide: getModelToken(AuthSession.name), useValue: sessionModel },
+        {
+          provide: getConnectionToken(),
+          useValue: connection,
+        },
+        {
+          provide: getModelToken(AuthAuditEvent.name),
+          useValue: auditModel,
+        },
       ],
     }).compile();
 
@@ -222,7 +268,11 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
   });
 
   beforeEach(async () => {
-    await Promise.all([sessionModel.deleteMany({}), userModel.deleteMany({})]);
+    await Promise.all([
+      auditModel.collection.deleteMany({}),
+      sessionModel.deleteMany({}),
+      userModel.deleteMany({}),
+    ]);
   });
 
   afterAll(async () => {
@@ -390,6 +440,71 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
       sessionService.rotateRefreshToken(target.tokens.refresh_token),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect((await getSessions(current.tokens.access_token)).status).toBe(200);
+
+    const userObjectId = new Types.ObjectId(String(user._id));
+
+    const audit = await auditModel.collection.findOne({
+      targetUserId: userObjectId,
+      eventCode: AuthAuditEventCode.SESSION_REVOKED,
+    });
+
+    expect(audit).toEqual(
+      expect.objectContaining({
+        eventCode: AuthAuditEventCode.SESSION_REVOKED,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.SESSION_REVOKE_REQUESTED,
+        sessionPublicId: target.id,
+      }),
+    );
+
+    expect(String(audit?.targetUserId)).toBe(userObjectId.toString());
+
+    expect(String(audit?.actorUserId)).toBe(userObjectId.toString());
+
+    expect(
+      await auditModel.collection.countDocuments({
+        targetUserId: userObjectId,
+        eventCode: AuthAuditEventCode.SESSION_REVOKED,
+      }),
+    ).toBe(1);
+  });
+
+  it('rolls back session revoke when audit persistence fails', async () => {
+    const user = await createUser('revoke-audit-failure');
+    const current = await createSession(user, 'Chrome Windows');
+    const target = await createSession(user, 'Firefox Linux');
+
+    const insertSpy = createAuditInsertSpy();
+
+    insertSpy.mockImplementationOnce(() =>
+      Promise.reject(createAuditFailure()),
+    );
+
+    const response = await (async () => {
+      try {
+        return await request(httpServer)
+          .delete(`/api/v1/auth/sessions/${target.id}`)
+          .set('Authorization', `Bearer ${current.tokens.access_token}`);
+      } finally {
+        insertSpy.mockRestore();
+      }
+    })();
+
+    expect(response.status).toBe(503);
+
+    const storedTarget = await sessionModel
+      .findOne({ publicId: target.id })
+      .lean()
+      .exec();
+
+    expect(storedTarget?.revokedAt).toBeNull();
+    expect(storedTarget?.revokeReason).toBeNull();
+
+    expect(
+      await auditModel.collection.countDocuments({
+        eventCode: AuthAuditEventCode.SESSION_REVOKED,
+      }),
+    ).toBe(0);
   });
 
   it('logs out all active sessions without overwriting prior reasons', async () => {
@@ -397,6 +512,17 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
     const current = await createSession(user, 'Chrome Windows');
     const previouslyRevoked = await createSession(user, 'Firefox Linux');
     const activeOther = await createSession(user, 'Safari Mac OS X');
+
+    const expired = await createSession(user, 'Edge Windows');
+
+    await sessionModel.updateOne(
+      { publicId: expired.id },
+      {
+        $set: {
+          expiresAt: new Date(Date.now() - 60_000),
+        },
+      },
+    );
 
     const revokeResponse = await request(httpServer)
       .delete(`/api/v1/auth/sessions/${previouslyRevoked.id}`)
@@ -443,8 +569,122 @@ describe('Auth sessions HTTP API MongoDB integration', () => {
     );
     expect(reasons.get(current.id)).toBe(SessionRevokeReason.LOGOUT_ALL);
     expect(reasons.get(activeOther.id)).toBe(SessionRevokeReason.LOGOUT_ALL);
+    expect(reasons.get(expired.id)).toBeNull();
+
+    const expiredStored = storedSessions.find(
+      (session) => session.publicId === expired.id,
+    );
+
+    expect(expiredStored?.revokedAt).toBeNull();
+
+    const userObjectId = new Types.ObjectId(String(user._id));
+
+    const logoutAudit = await auditModel.collection.findOne({
+      targetUserId: userObjectId,
+      eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+    });
+
+    expect(logoutAudit).toEqual(
+      expect.objectContaining({
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.LOGOUT_ALL_REQUESTED,
+        metadata: expect.objectContaining({
+          affectedSessionCount: 2,
+        }),
+      }),
+    );
+
+    expect(logoutAudit).not.toHaveProperty('sessionPublicId');
     expect(
-      storedSessions.every((session) => session.revokedAt instanceof Date),
+      await auditModel.collection.countDocuments({
+        targetUserId: userObjectId,
+        eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+      }),
+    ).toBe(1);
+  });
+
+  it('rolls back logout-all when audit persistence fails', async () => {
+    const user = await createUser('logout-all-audit-failure');
+    const current = await createSession(user, 'Chrome Windows');
+    const other = await createSession(user, 'Firefox Linux');
+
+    const insertSpy = createAuditInsertSpy();
+
+    insertSpy.mockImplementationOnce(() =>
+      Promise.reject(createAuditFailure()),
+    );
+
+    const response = await (async () => {
+      try {
+        return await request(httpServer)
+          .post('/api/v1/auth/logout-all')
+          .set('Authorization', `Bearer ${current.tokens.access_token}`);
+      } finally {
+        insertSpy.mockRestore();
+      }
+    })();
+
+    expect(response.status).toBe(503);
+
+    const sessions = await sessionModel
+      .find({
+        publicId: {
+          $in: [current.id, other.id],
+        },
+      })
+      .lean()
+      .exec();
+
+    expect(sessions).toHaveLength(2);
+    expect(
+      sessions.every(
+        (session) =>
+          session.revokedAt === null && session.revokeReason === null,
+      ),
     ).toBe(true);
+
+    expect(
+      await auditModel.collection.countDocuments({
+        eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+      }),
+    ).toBe(0);
+  });
+
+  it('writes one audit for concurrent logout-all', async () => {
+    const user = await createUser('logout-all-concurrent');
+
+    await Promise.all([
+      createSession(user, 'Chrome Windows'),
+      createSession(user, 'Firefox Linux'),
+    ]);
+
+    const userId = String(user._id);
+
+    const results = await Promise.all([
+      sessionService.logoutAllSessions(userId),
+      sessionService.logoutAllSessions(userId),
+    ]);
+
+    expect(results.sort((a, b) => a - b)).toEqual([0, 2]);
+
+    const userObjectId = new Types.ObjectId(userId);
+
+    expect(
+      await auditModel.collection.countDocuments({
+        targetUserId: userObjectId,
+        eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+      }),
+    ).toBe(1);
+
+    const audit = await auditModel.collection.findOne({
+      targetUserId: userObjectId,
+      eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+    });
+
+    expect(audit?.metadata).toEqual(
+      expect.objectContaining({
+        affectedSessionCount: 2,
+      }),
+    );
   });
 });

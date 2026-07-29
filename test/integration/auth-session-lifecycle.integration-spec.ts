@@ -7,9 +7,11 @@ import {
   describe,
   expect,
   it,
+  jest,
 } from '@jest/globals';
 import { Connection, createConnection, Model, Types } from 'mongoose';
 import { AuthSessionService } from '../../src/modules/auth/services/auth-session.service';
+import { AuthAuditService } from '../../src/modules/auth/services/auth-audit.service';
 import {
   AuthSession,
   AuthSessionSchema,
@@ -37,6 +39,7 @@ const configService = {
     })[key],
 } as ConfigService;
 
+jest.setTimeout(60_000);
 describe('Auth session lifecycle MongoDB integration', () => {
   let connection: Connection;
   let sessionModel: Model<AuthSession>;
@@ -89,11 +92,17 @@ describe('Auth session lifecycle MongoDB integration', () => {
 
     await Promise.all([sessionModel.syncIndexes(), userModel.syncIndexes()]);
 
+    const authAuditService = {
+      record: () => Promise.resolve(),
+    } as unknown as AuthAuditService;
+
     service = new AuthSessionService(
       sessionModel,
       userModel,
       new JwtService(),
       configService,
+      connection,
+      authAuditService,
     );
   });
 

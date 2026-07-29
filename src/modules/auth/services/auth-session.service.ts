@@ -1,15 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectModel } from '@nestjs/mongoose';
+import { InjectModel, InjectConnection } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
-import { type ClientSession, Model, Types } from 'mongoose';
+import { type ClientSession, Model, Types, Connection } from 'mongoose';
 import * as bcrypt from 'bcrypt';
+import { AuthAuditService } from './auth-audit.service';
 import { User } from '../../users/schemas/user.schema';
 import {
   AuthSession,
@@ -23,11 +26,17 @@ import {
   type SessionRequestMetadata,
 } from '../interfaces/auth-session.interface';
 import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../interfaces/auth-audit.interface';
+import {
   ACCESS_TOKEN_AUDIENCE,
   AUTH_JWT_ALGORITHM,
   AUTH_JWT_ISSUER,
   REFRESH_TOKEN_AUDIENCE,
 } from '../constants/auth-token.constants';
+import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 
 const DEFAULT_ACCESS_TTL_SECONDS = 15 * 60;
 const DEFAULT_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -64,6 +73,11 @@ export class AuthSessionService {
     private readonly userModel: Model<User>,
     private readonly jwtService: JwtService,
     configService: ConfigService,
+
+    @InjectConnection()
+    private readonly connection: Connection,
+
+    private readonly authAuditService: AuthAuditService,
   ) {
     this.accessSecret = this.readSecret(configService, 'JWT_SECRET');
     this.refreshSecret = this.readSecret(configService, 'JWT_REFRESH_SECRET');
@@ -170,10 +184,10 @@ export class AuthSessionService {
     }
 
     if (session.tokenVersion !== payload.version) {
-      await this.revokeSession(
+      await this.revokeSessionForRefreshReplay(
+        userId,
         session.publicId,
         session.tokenFamily,
-        SessionRevokeReason.REFRESH_REPLAY,
         now,
       );
 
@@ -186,10 +200,10 @@ export class AuthSessionService {
     );
 
     if (!tokenMatched) {
-      await this.revokeSession(
+      await this.revokeSessionForRefreshReplay(
+        userId,
         session.publicId,
         session.tokenFamily,
-        SessionRevokeReason.REFRESH_REPLAY,
         now,
       );
 
@@ -428,31 +442,70 @@ export class AuthSessionService {
       );
     }
 
-    const result = await this.sessionModel.updateOne(
-      {
-        userId: userObjectId,
-        publicId: targetSessionId,
-        revokedAt: null,
-        expiresAt: { $gt: new Date() },
-      },
-      {
-        $set: {
-          revokedAt: new Date(),
-          revokeReason: SessionRevokeReason.SESSION_REVOKED,
-        },
-      },
-    );
+    await this.runSessionSecurityTransaction(async (mongoSession) => {
+      const now = new Date();
 
-    if (result.modifiedCount !== 1) {
-      throw new NotFoundException('Không tìm thấy phiên đăng nhập');
-    }
+      const result = await this.sessionModel.updateOne(
+        {
+          userId: userObjectId,
+          publicId: targetSessionId,
+          revokedAt: null,
+          expiresAt: { $gt: now },
+        },
+        {
+          $set: {
+            revokedAt: now,
+            revokeReason: SessionRevokeReason.SESSION_REVOKED,
+          },
+        },
+        {
+          session: mongoSession,
+        },
+      );
+
+      if (result.modifiedCount !== 1) {
+        throw new NotFoundException('Không tìm thấy phiên đăng nhập');
+      }
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.SESSION_REVOKED,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.SESSION_REVOKE_REQUESTED,
+        targetUserId: userObjectId,
+        actorUserId: userObjectId,
+        sessionPublicId: targetSessionId,
+        mongoSession,
+      });
+    });
   }
 
   async logoutAllSessions(userId: string): Promise<number> {
-    return this.revokeAllSessions(
-      this.parseUserId(userId),
-      SessionRevokeReason.LOGOUT_ALL,
-    );
+    const userObjectId = this.parseUserId(userId);
+
+    return this.runSessionSecurityTransaction(async (mongoSession) => {
+      const affectedSessionCount = await this.revokeActiveSessionsForLogoutAll(
+        userObjectId,
+        mongoSession,
+      );
+
+      if (affectedSessionCount === 0) {
+        return 0;
+      }
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.LOGOUT_ALL_REQUESTED,
+        targetUserId: userObjectId,
+        actorUserId: userObjectId,
+        metadata: {
+          affectedSessionCount,
+        },
+        mongoSession,
+      });
+
+      return affectedSessionCount;
+    });
   }
 
   async isSessionActive(
@@ -471,6 +524,52 @@ export class AuthSessionService {
       .exec();
 
     return Boolean(result);
+  }
+
+  private async runSessionSecurityTransaction<T>(
+    operation: (session: ClientSession) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.connection.transaction(operation);
+    } catch (error: unknown) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      if (isMongoInfrastructureError(error)) {
+        throw new ServiceUnavailableException(
+          'Không thể hoàn tất thao tác bảo mật',
+        );
+      }
+
+      throw error;
+    }
+  }
+
+  private async revokeActiveSessionsForLogoutAll(
+    userId: Types.ObjectId,
+    mongoSession: ClientSession,
+  ): Promise<number> {
+    const now = new Date();
+
+    const result = await this.sessionModel.updateMany(
+      {
+        userId,
+        revokedAt: null,
+        expiresAt: { $gt: now },
+      },
+      {
+        $set: {
+          revokedAt: now,
+          revokeReason: SessionRevokeReason.LOGOUT_ALL,
+        },
+      },
+      {
+        session: mongoSession,
+      },
+    );
+
+    return result.modifiedCount;
   }
 
   private verifyRefreshToken(token: string): RefreshTokenPayload {
@@ -553,6 +652,52 @@ export class AuthSessionService {
     ) {
       throw new UnauthorizedException(INVALID_REFRESH_MESSAGE);
     }
+  }
+
+  private async revokeSessionForRefreshReplay(
+    userId: Types.ObjectId,
+    sessionId: string,
+    tokenFamily: string,
+    now: Date,
+  ): Promise<boolean> {
+    return this.runSessionSecurityTransaction(async (mongoSession) => {
+      const result = await this.sessionModel.updateOne(
+        {
+          userId,
+          publicId: sessionId,
+          tokenFamily,
+          revokedAt: null,
+          expiresAt: {
+            $gt: now,
+          },
+        },
+        {
+          $set: {
+            revokedAt: now,
+            revokeReason: SessionRevokeReason.REFRESH_REPLAY,
+          },
+        },
+        {
+          session: mongoSession,
+        },
+      );
+
+      if (result.modifiedCount !== 1) {
+        return false;
+      }
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.REFRESH_REPLAY_DETECTED,
+        outcome: AuthAuditOutcome.DENIED,
+        reasonCode: AuthAuditReasonCode.REFRESH_TOKEN_REPLAY,
+        targetUserId: userId,
+        actorUserId: null,
+        sessionPublicId: sessionId,
+        mongoSession,
+      });
+
+      return true;
+    });
   }
 
   private async revokeSession(

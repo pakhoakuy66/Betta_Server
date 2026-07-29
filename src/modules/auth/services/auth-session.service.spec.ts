@@ -1,14 +1,24 @@
-import { UnauthorizedException } from '@nestjs/common';
+import {
+  UnauthorizedException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
-import { type ClientSession, Model, Types } from 'mongoose';
+import { type ClientSession, type Connection, Model, Types } from 'mongoose';
 import { User } from '../../users/schemas/user.schema';
 import {
   AuthSession,
   SessionRevokeReason,
 } from '../schemas/auth-session.schema';
 import { AuthSessionService } from './auth-session.service';
+import { AuthAuditService } from './auth-audit.service';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../interfaces/auth-audit.interface';
 
 const ACCESS_SECRET = 'a'.repeat(48);
 const REFRESH_SECRET = 'b'.repeat(48);
@@ -93,6 +103,19 @@ const createConfig = (
 };
 
 const createContext = (config = createConfig()) => {
+  const transactionSession = {} as ClientSession;
+
+  const connection = {
+    transaction: jest.fn(
+      (operation: (session: ClientSession) => Promise<unknown>) =>
+        operation(transactionSession),
+    ),
+  };
+
+  const authAuditService = {
+    record: jest.fn<AuthAuditService['record']>(() => Promise.resolve()),
+  };
+
   const sessionModel = {
     create: jest.fn<SessionCreateFunction>((input) => Promise.resolve(input)),
     findOne: jest.fn<(filter: unknown) => QueryStub<AuthSession | null>>(),
@@ -104,9 +127,17 @@ const createContext = (config = createConfig()) => {
           options: unknown,
         ) => QueryStub<AuthSession | null>
       >(),
-    updateOne: jest.fn<(filter: unknown, update: unknown) => Promise<unknown>>(
-      () => Promise.resolve({ modifiedCount: 1 }),
-    ),
+    updateOne: jest.fn<
+      (
+        filter: unknown,
+        update: unknown,
+        options?: {
+          session?: ClientSession;
+        },
+      ) => Promise<{
+        modifiedCount: number;
+      }>
+    >(() => Promise.resolve({ modifiedCount: 1 })),
     updateMany: jest.fn<
       (
         filter: unknown,
@@ -135,9 +166,19 @@ const createContext = (config = createConfig()) => {
     userModel as unknown as Model<User>,
     jwtService,
     config,
+    connection as unknown as Connection,
+    authAuditService as unknown as AuthAuditService,
   );
 
-  return { service, sessionModel, userModel, jwtService };
+  return {
+    service,
+    sessionModel,
+    userModel,
+    jwtService,
+    connection,
+    transactionSession,
+    authAuditService,
+  };
 };
 
 const createUser = () => ({
@@ -268,10 +309,13 @@ describe('AuthSessionService', () => {
     expect(update.$set.expiresAt).toEqual(new Date(Date.now() + 604800 * 1000));
   });
 
-  it('does not revoke the winning session when CAS loses', async () => {
-    const { service, sessionModel, userModel } = createContext();
+  it('does not revoke or audit the winning session when CAS loses', async () => {
+    const { service, sessionModel, userModel, authAuditService, connection } =
+      createContext();
+
     const user = createUser();
     const initialTokens = await service.createSession(user as User, {});
+
     const storedSession = createStoredSession(
       getCreatedSessionInput(sessionModel.create),
     );
@@ -279,6 +323,7 @@ describe('AuthSessionService', () => {
     sessionModel.findOne.mockReturnValue(queryStub(storedSession));
     userModel.findById.mockReturnValue(queryStub(user as User));
     sessionModel.findOneAndUpdate.mockReturnValue(queryStub(null));
+
     sessionModel.updateOne.mockClear();
 
     await expect(
@@ -286,12 +331,17 @@ describe('AuthSessionService', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
 
     expect(sessionModel.updateOne).not.toHaveBeenCalled();
+    expect(authAuditService.record).not.toHaveBeenCalled();
+    expect(connection.transaction).not.toHaveBeenCalled();
   });
 
-  it('revokes a stale version as refresh replay', async () => {
-    const { service, sessionModel } = createContext();
+  it('revokes and audits a stale refresh version atomically', async () => {
+    const { service, sessionModel, transactionSession, authAuditService } =
+      createContext();
+
     const user = createUser();
     const initialTokens = await service.createSession(user as User, {});
+
     const stored = createStoredSession({
       ...getCreatedSessionInput(sessionModel.create),
       tokenVersion: 1,
@@ -305,14 +355,166 @@ describe('AuthSessionService', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
 
     expect(sessionModel.updateOne).toHaveBeenCalledWith(
-      expect.objectContaining({
+      {
+        userId: stored.userId,
         publicId: stored.publicId,
         tokenFamily: stored.tokenFamily,
-      }),
+        revokedAt: null,
+        expiresAt: {
+          $gt: expect.any(Date),
+        },
+      },
       {
+        $set: {
+          revokedAt: expect.any(Date),
+          revokeReason: SessionRevokeReason.REFRESH_REPLAY,
+        },
+      },
+      {
+        session: transactionSession,
+      },
+    );
+
+    expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+    expect(authAuditService.record).toHaveBeenCalledWith({
+      eventCode: AuthAuditEventCode.REFRESH_REPLAY_DETECTED,
+      outcome: AuthAuditOutcome.DENIED,
+      reasonCode: AuthAuditReasonCode.REFRESH_TOKEN_REPLAY,
+      targetUserId: stored.userId,
+      actorUserId: null,
+      sessionPublicId: stored.publicId,
+      mongoSession: transactionSession,
+    });
+  });
+
+  it('revokes and audits when refresh-token hash does not match', async () => {
+    const { service, sessionModel, transactionSession, authAuditService } =
+      createContext();
+
+    const user = createUser();
+
+    const initialTokens = await service.createSession(user as User, {});
+
+    const initialInput = getCreatedSessionInput(sessionModel.create, 0);
+
+    await service.createSession(user as User, {});
+
+    const differentSessionInput = getCreatedSessionInput(
+      sessionModel.create,
+      1,
+    );
+
+    const stored = createStoredSession({
+      ...initialInput,
+
+      // Giữ nguyên version/sid/family của token đầu tiên,
+      // nhưng dùng một hash hợp lệ thuộc token khác.
+      refreshTokenHash: differentSessionInput.refreshTokenHash,
+    });
+
+    sessionModel.findOne.mockReturnValue(queryStub(stored));
+    sessionModel.updateOne.mockClear();
+
+    await expect(
+      service.rotateRefreshToken(initialTokens.refresh_token),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(sessionModel.updateOne).toHaveBeenCalledWith(
+      {
+        userId: stored.userId,
+        publicId: stored.publicId,
+        tokenFamily: stored.tokenFamily,
+        revokedAt: null,
+        expiresAt: {
+          $gt: expect.any(Date),
+        },
+      },
+      {
+        $set: {
+          revokedAt: expect.any(Date),
+          revokeReason: SessionRevokeReason.REFRESH_REPLAY,
+        },
+      },
+      {
+        session: transactionSession,
+      },
+    );
+
+    expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+    expect(authAuditService.record).toHaveBeenCalledWith({
+      eventCode: AuthAuditEventCode.REFRESH_REPLAY_DETECTED,
+      outcome: AuthAuditOutcome.DENIED,
+      reasonCode: AuthAuditReasonCode.REFRESH_TOKEN_REPLAY,
+      targetUserId: stored.userId,
+      actorUserId: null,
+      sessionPublicId: stored.publicId,
+      mongoSession: transactionSession,
+    });
+  });
+
+  it('does not audit when another revoke wins the replay race', async () => {
+    const { service, sessionModel, authAuditService } = createContext();
+
+    const user = createUser();
+    const initialTokens = await service.createSession(user as User, {});
+
+    const stored = createStoredSession({
+      ...getCreatedSessionInput(sessionModel.create),
+      tokenVersion: 1,
+    });
+
+    sessionModel.findOne.mockReturnValue(queryStub(stored));
+
+    sessionModel.updateOne.mockResolvedValueOnce({
+      modifiedCount: 0,
+    });
+
+    await expect(
+      service.rotateRefreshToken(initialTokens.refresh_token),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(authAuditService.record).not.toHaveBeenCalled();
+  });
+
+  it('maps refresh replay audit infrastructure failure to 503', async () => {
+    const { service, sessionModel, authAuditService, transactionSession } =
+      createContext();
+
+    const user = createUser();
+    const initialTokens = await service.createSession(user as User, {});
+
+    const stored = createStoredSession({
+      ...getCreatedSessionInput(sessionModel.create),
+      tokenVersion: 1,
+    });
+
+    sessionModel.findOne.mockReturnValue(queryStub(stored));
+
+    authAuditService.record.mockRejectedValueOnce(
+      Object.assign(new Error('Audit persistence failed'), {
+        name: 'MongoServerSelectionError',
+      }),
+    );
+
+    await expect(
+      service.rotateRefreshToken(initialTokens.refresh_token),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    expect(sessionModel.updateOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: stored.userId,
+        publicId: stored.publicId,
+        revokedAt: null,
+      }),
+      expect.objectContaining({
         $set: expect.objectContaining({
           revokeReason: SessionRevokeReason.REFRESH_REPLAY,
         }),
+      }),
+      {
+        session: transactionSession,
       },
     );
   });
@@ -454,6 +656,139 @@ describe('AuthSessionService', () => {
       },
       {
         session: mongoSession,
+      },
+    );
+  });
+
+  it('revokes another session and audits atomically', async () => {
+    const { service, sessionModel, transactionSession, authAuditService } =
+      createContext();
+
+    const userId = new Types.ObjectId();
+    const currentId = `ses_${'a'.repeat(36)}`;
+    const targetId = `ses_${'b'.repeat(36)}`;
+
+    await service.revokeOtherSession(userId.toString(), targetId, currentId);
+
+    expect(sessionModel.updateOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId,
+        publicId: targetId,
+        revokedAt: null,
+        expiresAt: { $gt: expect.any(Date) },
+      }),
+      {
+        $set: {
+          revokedAt: expect.any(Date),
+          revokeReason: SessionRevokeReason.SESSION_REVOKED,
+        },
+      },
+      { session: transactionSession },
+    );
+
+    expect(authAuditService.record).toHaveBeenCalledWith({
+      eventCode: AuthAuditEventCode.SESSION_REVOKED,
+      outcome: AuthAuditOutcome.SUCCEEDED,
+      reasonCode: AuthAuditReasonCode.SESSION_REVOKE_REQUESTED,
+      targetUserId: userId,
+      actorUserId: userId,
+      sessionPublicId: targetId,
+      mongoSession: transactionSession,
+    });
+  });
+
+  it('does not audit a missing target session', async () => {
+    const { service, sessionModel, authAuditService } = createContext();
+
+    sessionModel.updateOne.mockResolvedValueOnce({
+      modifiedCount: 0,
+    });
+
+    await expect(
+      service.revokeOtherSession(
+        new Types.ObjectId().toString(),
+        `ses_${'b'.repeat(36)}`,
+        `ses_${'a'.repeat(36)}`,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(authAuditService.record).not.toHaveBeenCalled();
+  });
+
+  it('revokes only active sessions during logout-all', async () => {
+    const { service, sessionModel, transactionSession, authAuditService } =
+      createContext();
+
+    const userId = new Types.ObjectId();
+
+    await expect(service.logoutAllSessions(userId.toString())).resolves.toBe(2);
+
+    expect(sessionModel.updateMany).toHaveBeenCalledWith(
+      {
+        userId,
+        revokedAt: null,
+        expiresAt: { $gt: expect.any(Date) },
+      },
+      {
+        $set: {
+          revokedAt: expect.any(Date),
+          revokeReason: SessionRevokeReason.LOGOUT_ALL,
+        },
+      },
+      {
+        session: transactionSession,
+      },
+    );
+
+    expect(authAuditService.record).toHaveBeenCalledWith({
+      eventCode: AuthAuditEventCode.SESSIONS_REVOKED_ALL,
+      outcome: AuthAuditOutcome.SUCCEEDED,
+      reasonCode: AuthAuditReasonCode.LOGOUT_ALL_REQUESTED,
+      targetUserId: userId,
+      actorUserId: userId,
+      metadata: {
+        affectedSessionCount: 2,
+      },
+      mongoSession: transactionSession,
+    });
+  });
+
+  it('does not audit a logout-all race loser', async () => {
+    const { service, sessionModel, authAuditService } = createContext();
+
+    sessionModel.updateMany.mockResolvedValueOnce({
+      modifiedCount: 0,
+    });
+
+    await expect(
+      service.logoutAllSessions(new Types.ObjectId().toString()),
+    ).resolves.toBe(0);
+
+    expect(authAuditService.record).not.toHaveBeenCalled();
+  });
+
+  it('maps logout-all audit infrastructure failure to 503', async () => {
+    const { service, sessionModel, transactionSession, authAuditService } =
+      createContext();
+
+    authAuditService.record.mockRejectedValueOnce(
+      Object.assign(new Error('Audit persistence failed'), {
+        name: 'MongoServerSelectionError',
+      }),
+    );
+
+    await expect(
+      service.logoutAllSessions(new Types.ObjectId().toString()),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    expect(sessionModel.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        revokedAt: null,
+        expiresAt: { $gt: expect.any(Date) },
+      }),
+      expect.any(Object),
+      {
+        session: transactionSession,
       },
     );
   });

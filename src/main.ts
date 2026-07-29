@@ -3,24 +3,22 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import type { Express } from 'express';
+import { readExactCorsOrigins } from './common/config/exact-origin.config';
+import {
+  applyTrustProxyConfiguration,
+  type TrustProxyApplication,
+} from './common/config/trust-proxy.config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   const configService = app.get(ConfigService);
-  const trustProxyHops = Number(
-    configService.get<string>('TRUST_PROXY_HOPS') ?? 0,
-  );
 
-  if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
-    throw new Error('TRUST_PROXY_HOPS phải là số nguyên không âm');
-  }
+  const expressApplication = app
+    .getHttpAdapter()
+    .getInstance() as unknown as TrustProxyApplication;
 
-  if (trustProxyHops > 0) {
-    const expressApp = app.getHttpAdapter().getInstance() as Express;
-    expressApp.set('trust proxy', trustProxyHops);
-  }
+  applyTrustProxyConfiguration(expressApplication, configService);
 
   // 1. Kích hoạt Logger (Công cụ ghi chép hệ thống siêu cấp của Nest)
   const logger = new Logger('BettaSystem');
@@ -37,8 +35,10 @@ async function bootstrap() {
   // --------------------------------------------------------
 
   // 2. Kích hoạt CORS để Frontend có thể gọi API (Tránh lỗi chặn Cross-Origin)
+  const corsAllowedOrigins = readExactCorsOrigins(configService);
+
   app.enableCors({
-    origin: ['http://localhost:5173', 'http://10.7.83.88:5173'], // Khi đưa lên Production (ra mạng thật), nhớ đổi thành link Frontend: https://betta.app
+    origin: [...corsAllowedOrigins],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });

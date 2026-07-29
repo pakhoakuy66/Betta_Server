@@ -2,11 +2,19 @@ import {
   BadRequestException,
   ConflictException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 import type { MockedFunction } from 'jest-mock';
 import * as bcrypt from 'bcrypt';
+import type { ClientSession } from 'mongoose';
+import { SessionRevokeReason } from '../../auth/schemas/auth-session.schema';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../../auth/interfaces/auth-audit.interface';
 import { DEFAULT_AVATAR_ID, DEFAULT_AVATAR_URL } from '../schemas/user.schema';
 import {
   CURRENT_USER_ID,
@@ -32,6 +40,73 @@ const avatarFile = {
   mimetype: 'image/webp',
   size: 6,
   originalname: 'avatar.webp',
+};
+
+const createTransactionSession = (): ClientSession => {
+  const session = {
+    withTransaction: jest.fn<
+      (callback: () => Promise<unknown>) => Promise<unknown>
+    >((callback) => callback()),
+
+    endSession: jest.fn<() => Promise<void>>(() => Promise.resolve()),
+  };
+
+  return session as unknown as ClientSession;
+};
+
+const configureSuccessfulAccountDeletion = (
+  context: ReturnType<typeof createUsersServiceContext>,
+  session: ClientSession,
+): void => {
+  const { models, connection } = context;
+
+  connection.startSession.mockResolvedValue(session);
+
+  models.post.find.mockReturnValue(createQuery([]));
+  models.reaction.find.mockReturnValue(createQuery([]));
+  models.weeklyRecap.find.mockReturnValue(createQuery([]));
+
+  models.user.updateOne.mockReturnValue(
+    createQuery({
+      matchedCount: 1,
+      modifiedCount: 1,
+    }),
+  );
+
+  models.relationship.find.mockReturnValue(createQuery([]));
+
+  const emptyDeleteResult = {
+    acknowledged: true,
+    deletedCount: 0,
+  };
+
+  const emptyUpdateResult = {
+    acknowledged: true,
+    matchedCount: 0,
+    modifiedCount: 0,
+  };
+
+  models.relationship.deleteMany.mockReturnValue(
+    createQuery(emptyDeleteResult),
+  );
+  models.block.deleteMany.mockReturnValue(createQuery(emptyDeleteResult));
+  models.post.deleteMany.mockReturnValue(createQuery(emptyDeleteResult));
+  models.reaction.deleteMany.mockReturnValue(createQuery(emptyDeleteResult));
+  models.postShare.deleteMany.mockReturnValue(createQuery(emptyDeleteResult));
+  models.notification.deleteMany.mockReturnValue(
+    createQuery(emptyDeleteResult),
+  );
+  models.engagementEvent.deleteMany.mockReturnValue(
+    createQuery(emptyDeleteResult),
+  );
+  models.weeklyRecap.deleteMany.mockReturnValue(createQuery(emptyDeleteResult));
+  models.weeklyRecap.updateMany.mockReturnValue(createQuery(emptyUpdateResult));
+  models.streakHistory.deleteMany.mockReturnValue(
+    createQuery(emptyDeleteResult),
+  );
+  models.reportCooldown.deleteMany.mockReturnValue(
+    createQuery(emptyDeleteResult),
+  );
 };
 
 describe('UsersService write flows', () => {
@@ -295,7 +370,7 @@ describe('UsersService write flows', () => {
     });
   });
 
-  describe('softDeleteUser authorization gates', () => {
+  describe('softDeleteUser', () => {
     it('rejects an invalid user id before querying MongoDB', async () => {
       const { service, models } = createUsersServiceContext();
 
@@ -307,10 +382,13 @@ describe('UsersService write flows', () => {
     });
 
     it('rejects an incorrect password before opening a transaction', async () => {
-      const { service, models, connection } = createUsersServiceContext();
+      const { service, models, connection, authSessionService } =
+        createUsersServiceContext();
+
       const user = createUserSource();
 
       models.user.findOne.mockReturnValue(createQuery(user));
+
       compareMock.mockResolvedValue(false);
 
       await expect(
@@ -318,6 +396,117 @@ describe('UsersService write flows', () => {
       ).rejects.toBeInstanceOf(UnauthorizedException);
 
       expect(connection.startSession).not.toHaveBeenCalled();
+
+      expect(authSessionService.revokeAllSessions).not.toHaveBeenCalled();
+    });
+
+    it('does not revoke sessions when the user is already deleted', async () => {
+      const { service, models, connection, authSessionService } =
+        createUsersServiceContext();
+
+      models.user.findOne.mockReturnValue(createQuery(null));
+
+      await expect(
+        service.softDeleteUser(CURRENT_USER_ID.toString(), 'Password@123'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(connection.startSession).not.toHaveBeenCalled();
+
+      expect(authSessionService.revokeAllSessions).not.toHaveBeenCalled();
+    });
+
+    it('revokes every session with the transaction used by account deletion', async () => {
+      const context = createUsersServiceContext();
+
+      const { service, models, authSessionService, authAuditService } = context;
+
+      const transactionSession = createTransactionSession();
+
+      const user = createUserSource({
+        _id: CURRENT_USER_ID,
+      });
+
+      models.user.findOne.mockReturnValue(createQuery(user));
+
+      compareMock.mockResolvedValue(true);
+
+      configureSuccessfulAccountDeletion(context, transactionSession);
+      authSessionService.revokeAllSessions.mockResolvedValue(4);
+
+      await expect(
+        service.softDeleteUser(CURRENT_USER_ID.toString(), 'Password@123'),
+      ).resolves.toEqual({
+        success: true,
+        message: 'Đã xóa tài khoản thành công',
+      });
+
+      expect(authSessionService.revokeAllSessions).toHaveBeenCalledTimes(1);
+
+      const [calledUserId, calledReason, calledSession] =
+        authSessionService.revokeAllSessions.mock.calls[0];
+
+      expect(calledUserId.toString()).toBe(CURRENT_USER_ID.toString());
+
+      expect(calledReason).toBe(SessionRevokeReason.ACCOUNT_DELETED);
+
+      expect(calledSession).toBe(transactionSession);
+
+      expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+      const [auditInput] = authAuditService.record.mock.calls[0];
+
+      expect(auditInput.eventCode).toBe(AuthAuditEventCode.ACCOUNT_DELETED);
+      expect(auditInput.outcome).toBe(AuthAuditOutcome.SUCCEEDED);
+      expect(auditInput.reasonCode).toBe(
+        AuthAuditReasonCode.ACCOUNT_DELETION_COMPLETED,
+      );
+      expect(auditInput.targetUserId.toString()).toBe(
+        CURRENT_USER_ID.toString(),
+      );
+      expect(auditInput.actorUserId?.toString()).toBe(
+        CURRENT_USER_ID.toString(),
+      );
+      expect(auditInput.metadata).toEqual({ affectedSessionCount: 4 });
+      expect(auditInput.mongoSession).toBe(transactionSession);
+    });
+
+    it('maps an audit infrastructure failure to service unavailable', async () => {
+      const context = createUsersServiceContext();
+      const { service, models, authAuditService } = context;
+      const transactionSession = createTransactionSession();
+
+      models.user.findOne.mockReturnValue(
+        createQuery(createUserSource({ _id: CURRENT_USER_ID })),
+      );
+      compareMock.mockResolvedValue(true);
+      configureSuccessfulAccountDeletion(context, transactionSession);
+      authAuditService.record.mockRejectedValue(
+        Object.assign(new Error('audit unavailable'), {
+          name: 'MongoServerSelectionError',
+        }),
+      );
+
+      await expect(
+        service.softDeleteUser(CURRENT_USER_ID.toString(), 'Password@123'),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    });
+
+    it('preserves a non-Mongo audit error', async () => {
+      const context = createUsersServiceContext();
+      const { service, models, authAuditService } = context;
+      const transactionSession = createTransactionSession();
+      const expectedError = new Error('programming failure');
+
+      models.user.findOne.mockReturnValue(
+        createQuery(createUserSource({ _id: CURRENT_USER_ID })),
+      );
+      compareMock.mockResolvedValue(true);
+      configureSuccessfulAccountDeletion(context, transactionSession);
+      authAuditService.record.mockRejectedValue(expectedError);
+
+      await expect(
+        service.softDeleteUser(CURRENT_USER_ID.toString(), 'Password@123'),
+      ).rejects.toBe(expectedError);
     });
   });
 });

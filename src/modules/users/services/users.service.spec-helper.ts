@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import type { Mock } from 'jest-mock';
-import type { Connection, Model } from 'mongoose';
+import type { ClientSession, Connection, Model } from 'mongoose';
 import { Types } from 'mongoose';
 import { Block } from '../../relationshipModule/schemas/block.schema';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
@@ -22,6 +22,8 @@ import {
   User,
 } from '../schemas/user.schema';
 import { UsersService } from './users.service';
+import { AuthSessionService } from '../../auth/services/auth-session.service';
+import { AuthAuditService } from '../../auth/services/auth-audit.service';
 
 type UploadFileMock = {
   buffer: Buffer;
@@ -130,7 +132,7 @@ export const createUsersServiceContext = () => {
   };
 
   const connection = {
-    startSession: jest.fn(),
+    startSession: jest.fn<() => Promise<ClientSession>>(),
   };
 
   const uploadsService = {
@@ -141,6 +143,16 @@ export const createUsersServiceContext = () => {
     deleteImages: jest.fn<(publicIds: string[]) => Promise<void>>(() =>
       Promise.resolve(),
     ),
+  };
+
+  const authSessionService = {
+    revokeAllSessions: jest.fn<AuthSessionService['revokeAllSessions']>(() =>
+      Promise.resolve(0),
+    ),
+  };
+
+  const authAuditService = {
+    record: jest.fn<AuthAuditService['record']>(() => Promise.resolve()),
   };
 
   const service = new UsersService(
@@ -157,6 +169,8 @@ export const createUsersServiceContext = () => {
     models.streakHistory as unknown as Model<StreakHistory>,
     models.reportCooldown as unknown as Model<ReportCooldown>,
     uploadsService as unknown as UploadsService,
+    authSessionService as unknown as AuthSessionService,
+    authAuditService as unknown as AuthAuditService,
   );
 
   return {
@@ -164,5 +178,7 @@ export const createUsersServiceContext = () => {
     models,
     connection,
     uploadsService,
+    authSessionService,
+    authAuditService,
   };
 };

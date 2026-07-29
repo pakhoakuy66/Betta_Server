@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   HttpException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import {
@@ -26,6 +27,12 @@ import { SessionRevokeReason } from '../schemas/auth-session.schema';
 import { AuthService } from './auth.service';
 import { MailService } from './mail.service';
 import { AuthSessionService } from './auth-session.service';
+import { AuthAuditService } from './auth-audit.service';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../interfaces/auth-audit.interface';
 
 jest.mock('bcrypt', () => ({
   compare: jest.fn(),
@@ -65,14 +72,13 @@ type UserFixture = {
   fullname: string;
   phone: string;
   email: string;
-  password: string;
+  password?: string;
   avatar: string | null;
   avatarId: string;
   streakCount: number;
   status: string;
   isDeleted: boolean;
   notificationSettings: NotificationSettings;
-  refreshToken?: string | null;
   failedLoginAttempts?: number;
   failedLoginWindowStartedAt?: Date | null;
   lockedUntil?: Date | null;
@@ -128,7 +134,6 @@ const createUser = (overrides: Partial<UserFixture> = {}): UserFixture => ({
     reaction: false,
     recap: true,
   },
-  refreshToken: 'legacy-refresh-token-hash',
   failedLoginAttempts: 0,
   failedLoginWindowStartedAt: null,
   lockedUntil: null,
@@ -170,6 +175,10 @@ const createContext = () => {
     ),
   };
 
+  const authAuditService = {
+    record: jest.fn<AuthAuditService['record']>(() => Promise.resolve()),
+  };
+
   authSessionService.createSession.mockResolvedValue({
     access_token: 'access-token',
     refresh_token: 'refresh-token',
@@ -180,6 +189,7 @@ const createContext = () => {
     userModel as unknown as Model<User>,
     mailService as unknown as MailService,
     authSessionService as unknown as AuthSessionService,
+    authAuditService as unknown as AuthAuditService,
   );
 
   return {
@@ -189,6 +199,7 @@ const createContext = () => {
     userModel,
     mailService,
     authSessionService,
+    authAuditService,
   };
 };
 
@@ -352,11 +363,40 @@ describe('AuthService', () => {
       expect(userModel.findOneAndUpdate).not.toHaveBeenCalled();
     });
 
+    it('returns generic 401 without locking a Google-only account', async () => {
+      const user = createUser({ password: undefined });
+      const context = createContext();
+      const query = createQuery(user);
+
+      context.userModel.findOne.mockReturnValue(query);
+      compareMock.mockResolvedValue(false);
+
+      await expect(
+        context.service.login(
+          {
+            email: user.email,
+            password: 'AnyPassword@123',
+          },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(query.select).toHaveBeenCalledWith(
+        expect.stringContaining('+password'),
+      );
+      expect(compareMock).toHaveBeenCalledTimes(1);
+      expect(context.connection.transaction).not.toHaveBeenCalled();
+      expect(context.userModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(context.authAuditService.record).not.toHaveBeenCalled();
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
     it('returns 429 while the account lock is active', async () => {
       const user = createUser({
         lockedUntil: new Date(NOW.getTime() + 60_000),
       });
-      const { service, userModel } = createContext();
+      const { service, userModel, connection, authAuditService } =
+        createContext();
 
       userModel.findOne.mockReturnValue(createQuery(user));
       compareMock.mockResolvedValue(true);
@@ -374,16 +414,20 @@ describe('AuthService', () => {
       expect(error).toBeInstanceOf(HttpException);
       expect((error as HttpException).getStatus()).toBe(429);
       expect(userModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(connection.transaction).not.toHaveBeenCalled();
+      expect(authAuditService.record).not.toHaveBeenCalled();
     });
 
-    it('records a failed login attempt for a wrong password', async () => {
+    it('does not audit a failed login below the threshold', async () => {
       const user = createUser();
-      const { service, userModel } = createContext();
+      const { service, userModel, connection, authAuditService } =
+        createContext();
 
       userModel.findOne.mockReturnValue(createQuery(user));
       userModel.findOneAndUpdate.mockReturnValue(
         createQuery({
           ...user,
+          failedLoginAttempts: 4,
           lockedUntil: null,
         }),
       );
@@ -399,7 +443,115 @@ describe('AuthService', () => {
         ),
       ).rejects.toBeInstanceOf(UnauthorizedException);
 
-      expect(userModel.findOneAndUpdate).toHaveBeenCalled();
+      expect(connection.transaction).toHaveBeenCalledTimes(1);
+      expect(authAuditService.record).not.toHaveBeenCalled();
+    });
+
+    it('writes account-lock audit with the same transaction', async () => {
+      const user = createUser();
+      const lockedUntil = new Date(NOW.getTime() + 15 * 60_000);
+
+      const { service, userModel, transactionSession, authAuditService } =
+        createContext();
+
+      userModel.findOne.mockReturnValue(createQuery(user));
+      userModel.findOneAndUpdate.mockReturnValue(
+        createQuery({
+          ...user,
+          failedLoginAttempts: 5,
+          lockedUntil,
+        }),
+      );
+      compareMock.mockResolvedValue(false);
+
+      const error = await service
+        .login(
+          {
+            email: user.email,
+            password: 'WrongPassword@1',
+          },
+          {},
+        )
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HttpException);
+      expect((error as HttpException).getStatus()).toBe(429);
+
+      expect(authAuditService.record).toHaveBeenCalledWith({
+        eventCode: AuthAuditEventCode.ACCOUNT_LOCKED,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.LOGIN_FAILURE_THRESHOLD,
+        targetUserId: user._id,
+        actorUserId: null,
+        mongoSession: transactionSession,
+      });
+    });
+
+    it('does not duplicate audit when another request created the lock', async () => {
+      const user = createUser();
+      const lockedUntil = new Date(NOW.getTime() + 15 * 60_000);
+
+      const { service, userModel, authAuditService } = createContext();
+
+      userModel.findOne
+        .mockReturnValueOnce(createQuery(user))
+        .mockReturnValueOnce(
+          createQuery({
+            lockedUntil,
+          }),
+        );
+
+      userModel.findOneAndUpdate.mockReturnValue(createQuery(null));
+
+      compareMock.mockResolvedValue(false);
+
+      const error = await service
+        .login(
+          {
+            email: user.email,
+            password: 'WrongPassword@1',
+          },
+          {},
+        )
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HttpException);
+      expect((error as HttpException).getStatus()).toBe(429);
+      expect(authAuditService.record).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 when account-lock audit persistence fails', async () => {
+      const user = createUser();
+      const lockedUntil = new Date(NOW.getTime() + 15 * 60_000);
+
+      const { service, userModel, authAuditService } = createContext();
+
+      userModel.findOne.mockReturnValue(createQuery(user));
+      userModel.findOneAndUpdate.mockReturnValue(
+        createQuery({
+          ...user,
+          failedLoginAttempts: 5,
+          lockedUntil,
+        }),
+      );
+
+      compareMock.mockResolvedValue(false);
+
+      authAuditService.record.mockRejectedValueOnce(
+        Object.assign(new Error('Audit persistence failed'), {
+          name: 'MongoServerSelectionError',
+        }),
+      );
+
+      await expect(
+        service.login(
+          {
+            email: user.email,
+            password: 'WrongPassword@1',
+          },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
     });
 
     it('creates a session and resets login failure metadata', async () => {
@@ -669,7 +821,8 @@ describe('AuthService', () => {
         forgotPasswordExpiry: new Date(NOW.getTime() + 60_000),
       });
 
-      const { service, userModel, authSessionService } = createContext();
+      const { service, userModel, authSessionService, authAuditService } =
+        createContext();
 
       userModel.findOne.mockReturnValue(createQuery(user));
 
@@ -686,6 +839,7 @@ describe('AuthService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
 
       expect(authSessionService.revokeAllSessions).not.toHaveBeenCalled();
+      expect(authAuditService.record).not.toHaveBeenCalled();
     });
 
     it('updates password and revokes every session atomically', async () => {
@@ -696,7 +850,6 @@ describe('AuthService', () => {
         failedLoginAttempts: 4,
         failedLoginWindowStartedAt: NOW,
         lockedUntil: new Date(NOW.getTime() + 60_000),
-        refreshToken: 'old-refresh-hash',
       });
 
       const {
@@ -705,6 +858,7 @@ describe('AuthService', () => {
         connection,
         transactionSession,
         authSessionService,
+        authAuditService,
       } = createContext();
 
       userModel.findOne.mockReturnValue(createQuery(user));
@@ -712,6 +866,7 @@ describe('AuthService', () => {
       userModel.updateOne.mockReturnValue(createUpdateQuery(1));
 
       compareMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      authSessionService.revokeAllSessions.mockResolvedValue(3);
 
       await expect(
         service.resetPassword({
@@ -739,7 +894,6 @@ describe('AuthService', () => {
         {
           $set: {
             password: 'hashed:NewPassword@123',
-            refreshToken: null,
             forgotPasswordAttempts: 0,
             failedLoginAttempts: 0,
           },
@@ -765,6 +919,89 @@ describe('AuthService', () => {
       const [calledUserId] = authSessionService.revokeAllSessions.mock.calls[0];
 
       expect(calledUserId.toString()).toBe(user._id.toString());
+
+      expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+      const [auditInput] = authAuditService.record.mock.calls[0];
+
+      expect(auditInput.eventCode).toBe(AuthAuditEventCode.PASSWORD_RESET);
+      expect(auditInput.outcome).toBe(AuthAuditOutcome.SUCCEEDED);
+      expect(auditInput.reasonCode).toBe(
+        AuthAuditReasonCode.PASSWORD_RESET_COMPLETED,
+      );
+      expect(auditInput.targetUserId.toString()).toBe(user._id.toString());
+      expect(auditInput.actorUserId).toBeNull();
+      expect(auditInput.metadata).toEqual({ affectedSessionCount: 3 });
+      expect(auditInput.mongoSession).toBe(transactionSession);
+    });
+
+    it('allows a Google-only account to establish its first password', async () => {
+      const user = createUser({
+        password: undefined,
+        forgotPasswordOtp: 'otp-hash',
+        forgotPasswordExpiry: new Date(NOW.getTime() + 60_000),
+      });
+
+      const {
+        service,
+        userModel,
+        transactionSession,
+        authSessionService,
+        authAuditService,
+      } = createContext();
+
+      userModel.findOne.mockReturnValue(createQuery(user));
+      userModel.updateOne.mockReturnValue(createUpdateQuery(1));
+
+      compareMock.mockResolvedValueOnce(true);
+      authSessionService.revokeAllSessions.mockResolvedValue(0);
+
+      await expect(
+        service.resetPassword({
+          email: user.email,
+          otp: '123456',
+          newPassword: 'NewPassword@123',
+        }),
+      ).resolves.toStrictEqual({
+        success: true,
+        message: 'Đổi mật khẩu thành công!',
+      });
+
+      expect(compareMock).toHaveBeenCalledTimes(1);
+
+      expect(userModel.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _id: user._id,
+          password: {
+            $exists: false,
+          },
+          forgotPasswordOtp: 'otp-hash',
+          isDeleted: false,
+          status: 'active',
+        }),
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            password: 'hashed:NewPassword@123',
+          }),
+        }),
+        expect.objectContaining({
+          session: transactionSession,
+          runValidators: true,
+        }),
+      );
+
+      expect(authSessionService.revokeAllSessions).toHaveBeenCalledWith(
+        expect.any(Types.ObjectId),
+        SessionRevokeReason.PASSWORD_RESET,
+        transactionSession,
+      );
+
+      expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+      const [auditInput] = authAuditService.record.mock.calls[0];
+
+      expect(auditInput.eventCode).toBe(AuthAuditEventCode.PASSWORD_RESET);
+      expect(auditInput.mongoSession).toBe(transactionSession);
     });
   });
 
@@ -834,6 +1071,7 @@ describe('AuthService', () => {
         connection,
         transactionSession,
         authSessionService,
+        authAuditService,
       } = createContext();
 
       userModel.findOne.mockReturnValue(createQuery(user));
@@ -841,6 +1079,7 @@ describe('AuthService', () => {
       userModel.updateOne.mockReturnValue(createUpdateQuery(1));
 
       compareMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      authSessionService.revokeAllSessions.mockResolvedValue(2);
 
       await expect(
         service.changePassword(user._id.toString(), {
@@ -867,7 +1106,6 @@ describe('AuthService', () => {
         {
           $set: {
             password: 'hashed:NewPassword@123',
-            refreshToken: null,
           },
         },
         {
@@ -884,6 +1122,84 @@ describe('AuthService', () => {
 
       const [calledUserId] = authSessionService.revokeAllSessions.mock.calls[0];
       expect(calledUserId.toString()).toBe(user._id.toString());
+
+      expect(authAuditService.record).toHaveBeenCalledTimes(1);
+
+      const [auditInput] = authAuditService.record.mock.calls[0];
+
+      expect(auditInput.eventCode).toBe(AuthAuditEventCode.PASSWORD_CHANGED);
+      expect(auditInput.outcome).toBe(AuthAuditOutcome.SUCCEEDED);
+      expect(auditInput.reasonCode).toBe(
+        AuthAuditReasonCode.PASSWORD_CHANGE_COMPLETED,
+      );
+      expect(auditInput.targetUserId.toString()).toBe(user._id.toString());
+      expect(auditInput.actorUserId).toBeInstanceOf(Types.ObjectId);
+      expect(auditInput.actorUserId?.toString()).toBe(user._id.toString());
+      expect(auditInput.metadata).toEqual({ affectedSessionCount: 2 });
+      expect(auditInput.mongoSession).toBe(transactionSession);
+    });
+
+    it('maps an audit infrastructure failure to service unavailable', async () => {
+      const user = createUser();
+      const { service, userModel, authAuditService } = createContext();
+
+      userModel.findOne.mockReturnValue(createQuery(user));
+      userModel.updateOne.mockReturnValue(createUpdateQuery(1));
+      compareMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      authAuditService.record.mockRejectedValue(
+        Object.assign(new Error('audit unavailable'), {
+          code: 'ECONNRESET',
+        }),
+      );
+
+      await expect(
+        service.changePassword(user._id.toString(), {
+          currentPassword: 'CurrentPassword@1',
+          newPassword: 'NewPassword@123',
+          confirmPassword: 'NewPassword@123',
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    });
+
+    it('preserves a non-Mongo audit error', async () => {
+      const user = createUser();
+      const expectedError = new Error('programming failure');
+      const { service, userModel, authAuditService } = createContext();
+
+      userModel.findOne.mockReturnValue(createQuery(user));
+      userModel.updateOne.mockReturnValue(createUpdateQuery(1));
+      compareMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      authAuditService.record.mockRejectedValue(expectedError);
+
+      await expect(
+        service.changePassword(user._id.toString(), {
+          currentPassword: 'CurrentPassword@1',
+          newPassword: 'NewPassword@123',
+          confirmPassword: 'NewPassword@123',
+        }),
+      ).rejects.toBe(expectedError);
+    });
+
+    it('rejects change-password for a Google-only account', async () => {
+      const user = createUser({ password: undefined });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+
+      await expect(
+        context.service.changePassword(user._id.toString(), {
+          currentPassword: 'CurrentPassword@1',
+          newPassword: 'NewPassword@123',
+          confirmPassword: 'NewPassword@123',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(compareMock).not.toHaveBeenCalled();
+      expect(context.connection.transaction).not.toHaveBeenCalled();
+      expect(
+        context.authSessionService.revokeAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(context.authAuditService.record).not.toHaveBeenCalled();
     });
   });
 

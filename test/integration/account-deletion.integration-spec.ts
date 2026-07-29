@@ -1,4 +1,11 @@
-import { NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import {
+  NotFoundException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import {
   afterAll,
   beforeAll,
@@ -52,6 +59,23 @@ import {
   StreakHistory,
   StreakHistorySchema,
 } from '../../src/modules/streak/schemas/streak.schema';
+import {
+  AuthSession,
+  type AuthSessionDocument,
+  AuthSessionSchema,
+  SessionRevokeReason,
+} from '../../src/modules/auth/schemas/auth-session.schema';
+import { AuthSessionService } from '../../src/modules/auth/services/auth-session.service';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../../src/modules/auth/interfaces/auth-audit.interface';
+import {
+  AuthAuditEvent,
+  AuthAuditEventSchema,
+} from '../../src/modules/auth/schemas/auth-audit-event.schema';
+import { AuthAuditService } from '../../src/modules/auth/services/auth-audit.service';
 import { UploadsService } from '../../src/modules/uploads/services/uploads.service';
 import {
   DEFAULT_AVATAR_ID,
@@ -83,6 +107,8 @@ type UserOptions = {
   avatar?: string;
 };
 
+type AuditInsertManyMethod = (...args: unknown[]) => Promise<unknown>;
+
 jest.setTimeout(120_000);
 
 if (Buffer.byteLength(databaseName, 'utf8') > MAX_DATABASE_NAME_BYTES) {
@@ -107,7 +133,11 @@ describe('Account deletion MongoDB integration', () => {
   let weeklyRecapModel: Model<WeeklyRecap>;
   let streakHistoryModel: Model<StreakHistory>;
   let reportCooldownModel: Model<ReportCooldown>;
+  let authSessionModel: Model<AuthSession>;
+  let auditModel: Model<AuthAuditEvent>;
 
+  let authSessionService: AuthSessionService;
+  let authAuditService: AuthAuditService;
   let usersService: UsersService;
   let passwordHash: string;
   let userSequence = 0;
@@ -134,7 +164,6 @@ describe('Account deletion MongoDB integration', () => {
       phone: `07${userSequence.toString().padStart(8, '0')}`,
       email: `account_it_${label}@example.com`,
       password: passwordHash,
-      refreshToken: 'sha256-bcrypt-v1:stored-refresh-token-hash',
       avatarId: options.avatarId ?? DEFAULT_AVATAR_ID,
       avatar: options.avatar ?? DEFAULT_AVATAR_URL,
       bio: 'Integration bio',
@@ -170,6 +199,36 @@ describe('Account deletion MongoDB integration', () => {
       isDeletedByAdmin: false,
     });
 
+  const createAuthSession = (
+    userId: Types.ObjectId,
+  ): Promise<AuthSessionDocument> => {
+    const now = new Date();
+
+    return authSessionModel.create({
+      userId,
+      publicId: `ses_${randomUUID()}`,
+      tokenFamily: randomUUID(),
+      tokenVersion: 0,
+      refreshTokenHash: 'sha256-bcrypt-v1:integration-session-hash',
+      deviceLabel: 'Chrome trên Windows',
+      lastUsedAt: now,
+      expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      revokedAt: null,
+      revokeReason: null,
+    });
+  };
+
+  const createAuditInsertSpy = () =>
+    jest.spyOn(
+      auditModel as unknown as { insertMany: AuditInsertManyMethod },
+      'insertMany',
+    );
+
+  const createNonTransientAuditError = (): Error =>
+    Object.assign(new Error('Audit persistence failed'), {
+      name: 'MongoServerSelectionError',
+    });
+
   beforeAll(async () => {
     const uri = process.env[MONGODB_URI_ENV];
     const confirmation = process.env[CONFIRMATION_ENV];
@@ -197,6 +256,14 @@ describe('Account deletion MongoDB integration', () => {
     }
 
     userModel = connection.model<User>(User.name, UserSchema);
+    authSessionModel = connection.model<AuthSession>(
+      AuthSession.name,
+      AuthSessionSchema,
+    );
+    auditModel = connection.model<AuthAuditEvent>(
+      AuthAuditEvent.name,
+      AuthAuditEventSchema,
+    );
     relationshipModel = connection.model<Relationship>(
       Relationship.name,
       RelationshipSchema,
@@ -241,6 +308,7 @@ describe('Account deletion MongoDB integration', () => {
 
     await Promise.all([
       userModel.syncIndexes(),
+      authSessionModel.syncIndexes(),
       relationshipModel.syncIndexes(),
       blockModel.syncIndexes(),
       postModel.syncIndexes(),
@@ -251,9 +319,27 @@ describe('Account deletion MongoDB integration', () => {
       weeklyRecapModel.syncIndexes(),
       streakHistoryModel.syncIndexes(),
       reportCooldownModel.syncIndexes(),
+      auditModel.syncIndexes(),
     ]);
 
     passwordHash = await bcrypt.hash(CURRENT_PASSWORD, 10);
+
+    const authConfigService = new ConfigService({
+      JWT_SECRET: 'account-delete-access-secret-minimum-32-characters',
+      JWT_REFRESH_SECRET: 'account-delete-refresh-secret-minimum-32-characters',
+      AUTH_AUDIT_RETENTION_DAYS: 180,
+    });
+
+    authAuditService = new AuthAuditService(auditModel, authConfigService);
+
+    authSessionService = new AuthSessionService(
+      authSessionModel,
+      userModel,
+      new JwtService(),
+      authConfigService,
+      connection,
+      authAuditService,
+    );
 
     usersService = new UsersService(
       connection,
@@ -269,6 +355,8 @@ describe('Account deletion MongoDB integration', () => {
       streakHistoryModel,
       reportCooldownModel,
       uploadsService as unknown as UploadsService,
+      authSessionService,
+      authAuditService,
     );
   });
 
@@ -281,6 +369,8 @@ describe('Account deletion MongoDB integration', () => {
     deleteImagesMock.mockImplementation(() => Promise.resolve());
 
     await Promise.all([
+      auditModel.collection.deleteMany({}),
+      authSessionModel.deleteMany({}),
       reportCooldownModel.deleteMany({}),
       streakHistoryModel.deleteMany({}),
       weeklyRecapModel.deleteMany({}),
@@ -322,19 +412,153 @@ describe('Account deletion MongoDB integration', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
 
     const [storedUser, storedPost] = await Promise.all([
-      userModel.findById(user._id).select('+refreshToken').lean().exec(),
+      userModel.findById(user._id).lean().exec(),
       postModel.findById(post._id).lean().exec(),
     ]);
 
     expect(storedUser).toEqual(
       expect.objectContaining({
         isDeleted: false,
-        refreshToken: 'sha256-bcrypt-v1:stored-refresh-token-hash',
         postsCount: 1,
       }),
     );
     expect(storedPost).not.toBeNull();
     expect(deleteImagesMock).not.toHaveBeenCalled();
+  });
+
+  it('deletes the account when no auth session exists', async () => {
+    const user = await createUser('no_auth_sessions');
+
+    await expect(
+      usersService.softDeleteUser(user._id.toString(), CURRENT_PASSWORD),
+    ).resolves.toEqual({
+      success: true,
+      message: 'Đã xóa tài khoản thành công',
+    });
+
+    expect(
+      await authSessionModel.countDocuments({
+        userId: user._id,
+      }),
+    ).toBe(0);
+
+    const storedUser = await userModel.findById(user._id).lean().exec();
+
+    expect(storedUser?.isDeleted).toBe(true);
+    expect(
+      await auditModel.collection.findOne({
+        targetUserId: user._id,
+        eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.ACCOUNT_DELETION_COMPLETED,
+        targetUserId: user._id,
+        actorUserId: user._id,
+        metadata: expect.objectContaining({ affectedSessionCount: 0 }),
+      }),
+    );
+  });
+
+  it('rolls back account deletion when session revocation fails', async () => {
+    const user = await createUser('revoke_failure', { postsCount: 1 });
+
+    const post = await createPost(user._id, 'post_revoke_failure', 0);
+
+    const authSession = await createAuthSession(user._id);
+
+    const revokeSpy = jest
+      .spyOn(authSessionService, 'revokeAllSessions')
+      .mockRejectedValueOnce(new Error('Session revocation failed'));
+
+    try {
+      await expect(
+        usersService.softDeleteUser(user._id.toString(), CURRENT_PASSWORD),
+      ).rejects.toThrow('Session revocation failed');
+
+      const [storedUser, storedSession, storedPost] = await Promise.all([
+        userModel.findById(user._id).lean().exec(),
+
+        authSessionModel.findById(authSession._id).lean().exec(),
+
+        postModel.findById(post._id).lean().exec(),
+      ]);
+
+      expect(storedUser).toEqual(
+        expect.objectContaining({
+          isDeleted: false,
+          status: 'active',
+        }),
+      );
+
+      expect(storedSession).toEqual(
+        expect.objectContaining({
+          revokedAt: null,
+          revokeReason: null,
+        }),
+      );
+
+      expect(storedPost).not.toBeNull();
+    } finally {
+      revokeSpy.mockRestore();
+    }
+  });
+
+  it('rolls back account deletion when audit persistence fails', async () => {
+    const user = await createUser('audit_failure', { postsCount: 1 });
+    const originalUser = {
+      status: user.status,
+      username: user.username,
+      email: user.email,
+    };
+    const session = await createAuthSession(user._id);
+    const target = await createUser('audit_failure_target');
+    const relationship = await relationshipModel.create({
+      followerId: user._id,
+      followingId: target._id,
+    });
+    const post = await createPost(user._id, 'post_audit_failure', 0);
+    const auditInsertSpy = createAuditInsertSpy();
+    auditInsertSpy.mockImplementationOnce(() =>
+      Promise.reject(createNonTransientAuditError()),
+    );
+
+    try {
+      await expect(
+        usersService.softDeleteUser(user._id.toString(), CURRENT_PASSWORD),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    } finally {
+      auditInsertSpy.mockRestore();
+    }
+
+    const [storedUser, storedSession, storedRelationship, storedPost] =
+      await Promise.all([
+        userModel.findById(user._id).lean().exec(),
+        authSessionModel.findById(session._id).lean().exec(),
+        relationshipModel.findById(relationship._id).lean().exec(),
+        postModel.findById(post._id).lean().exec(),
+      ]);
+
+    expect(storedUser).toEqual(
+      expect.objectContaining({
+        isDeleted: false,
+        status: originalUser.status,
+        username: originalUser.username,
+        email: originalUser.email,
+      }),
+    );
+    expect(storedSession).toEqual(
+      expect.objectContaining({ revokedAt: null, revokeReason: null }),
+    );
+    expect(storedRelationship).not.toBeNull();
+    expect(storedPost).not.toBeNull();
+    expect(
+      await auditModel.collection.countDocuments({
+        targetUserId: user._id,
+        eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+      }),
+    ).toBe(0);
   });
 
   it('soft-deletes the account and cleans dependent data atomically', async () => {
@@ -619,7 +843,7 @@ describe('Account deletion MongoDB integration', () => {
     const storedDeletedUser = await userModel
       .findById(deletedUser._id)
       .select(
-        '+refreshToken +forgotPasswordOtp +forgotPasswordExpiry ' +
+        '+forgotPasswordOtp +forgotPasswordExpiry ' +
           '+forgotPasswordAttempts +failedLoginAttempts ' +
           '+failedLoginWindowStartedAt +lockedUntil',
       )
@@ -629,7 +853,6 @@ describe('Account deletion MongoDB integration', () => {
     expect(storedDeletedUser).toEqual(
       expect.objectContaining({
         isDeleted: true,
-        refreshToken: null,
         followersCount: 0,
         followingCount: 0,
         postsCount: 0,
@@ -710,6 +933,7 @@ describe('Account deletion MongoDB integration', () => {
       followingCount: 1,
       postsCount: 1,
     });
+    const authSession = await createAuthSession(deletedUser._id);
     const target = await createUser('rollback_target', {
       followersCount: 1,
     });
@@ -722,29 +946,45 @@ describe('Account deletion MongoDB integration', () => {
     const post = await createPost(deletedUser._id, 'post_account_rollback', 0);
 
     forceStreakDeleteFailure = true;
+    const auditInsertSpy = createAuditInsertSpy();
 
-    await expect(
-      usersService.softDeleteUser(deletedUser._id.toString(), CURRENT_PASSWORD),
-    ).rejects.toThrow('Forced account deletion transaction failure');
+    try {
+      await expect(
+        usersService.softDeleteUser(
+          deletedUser._id.toString(),
+          CURRENT_PASSWORD,
+        ),
+      ).rejects.toThrow('Forced account deletion transaction failure');
 
-    forceStreakDeleteFailure = false;
+      expect(auditInsertSpy).toHaveBeenCalledTimes(1);
+      expect(
+        await auditModel.collection.countDocuments({
+          targetUserId: deletedUser._id,
+          eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+        }),
+      ).toBe(0);
+    } finally {
+      forceStreakDeleteFailure = false;
+      auditInsertSpy.mockRestore();
+    }
 
-    const [storedUser, storedRelationship, storedPost, storedTarget] =
-      await Promise.all([
-        userModel
-          .findById(deletedUser._id)
-          .select('+refreshToken')
-          .lean()
-          .exec(),
-        relationshipModel.findById(relationship._id).lean().exec(),
-        postModel.findById(post._id).lean().exec(),
-        userModel.findById(target._id).lean().exec(),
-      ]);
+    const [
+      storedUser,
+      storedRelationship,
+      storedPost,
+      storedTarget,
+      storedAuthSession,
+    ] = await Promise.all([
+      userModel.findById(deletedUser._id).lean().exec(),
+      relationshipModel.findById(relationship._id).lean().exec(),
+      postModel.findById(post._id).lean().exec(),
+      userModel.findById(target._id).lean().exec(),
+      authSessionModel.findById(authSession._id).lean().exec(),
+    ]);
 
     expect(storedUser).toEqual(
       expect.objectContaining({
         isDeleted: false,
-        refreshToken: 'sha256-bcrypt-v1:stored-refresh-token-hash',
         followingCount: 1,
         postsCount: 1,
       }),
@@ -753,10 +993,33 @@ describe('Account deletion MongoDB integration', () => {
     expect(storedPost).not.toBeNull();
     expect(storedTarget?.followersCount).toBe(1);
     expect(deleteImagesMock).not.toHaveBeenCalled();
+    expect(storedAuthSession).toEqual(
+      expect.objectContaining({
+        revokedAt: null,
+        revokeReason: null,
+      }),
+    );
   });
 
   it('allows only one concurrent account deletion to succeed', async () => {
     const user = await createUser('concurrent');
+
+    const [activeSessionA, activeSessionB, preRevokedSession] =
+      await Promise.all([
+        createAuthSession(user._id),
+        createAuthSession(user._id),
+        createAuthSession(user._id),
+      ]);
+    const originalRevokedAt = new Date(Date.now() - 1_000);
+    await authSessionModel.updateOne(
+      { _id: preRevokedSession._id },
+      {
+        $set: {
+          revokedAt: originalRevokedAt,
+          revokeReason: SessionRevokeReason.LOGOUT,
+        },
+      },
+    );
 
     const outcomes = await Promise.allSettled([
       usersService.softDeleteUser(user._id.toString(), CURRENT_PASSWORD),
@@ -770,16 +1033,46 @@ describe('Account deletion MongoDB integration', () => {
       outcomes.filter((outcome) => outcome.status === 'rejected'),
     ).toHaveLength(1);
 
-    const storedUser = await userModel
-      .findById(user._id)
-      .select('+refreshToken')
-      .lean()
-      .exec();
+    const storedUser = await userModel.findById(user._id).lean().exec();
+
+    const [newlyRevokedSessions, unchangedSession, audit] = await Promise.all([
+      authSessionModel
+        .find({ _id: { $in: [activeSessionA._id, activeSessionB._id] } })
+        .lean()
+        .exec(),
+      authSessionModel.findById(preRevokedSession._id).lean().exec(),
+      auditModel.collection.findOne({
+        targetUserId: user._id,
+        eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+      }),
+    ]);
+
+    expect(newlyRevokedSessions).toHaveLength(2);
+
+    expect(
+      newlyRevokedSessions.every(
+        (session) =>
+          session.revokedAt instanceof Date &&
+          session.revokeReason === SessionRevokeReason.ACCOUNT_DELETED,
+      ),
+    ).toBe(true);
+    expect(unchangedSession?.revokedAt?.getTime()).toBe(
+      originalRevokedAt.getTime(),
+    );
+    expect(unchangedSession?.revokeReason).toBe(SessionRevokeReason.LOGOUT);
+    expect(audit?.metadata).toEqual(
+      expect.objectContaining({ affectedSessionCount: 2 }),
+    );
+    expect(
+      await auditModel.collection.countDocuments({
+        targetUserId: user._id,
+        eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+      }),
+    ).toBe(1);
 
     expect(storedUser).toEqual(
       expect.objectContaining({
         isDeleted: true,
-        refreshToken: null,
       }),
     );
   });

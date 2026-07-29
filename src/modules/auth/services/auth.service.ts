@@ -1,4 +1,5 @@
 import {
+  ServiceUnavailableException,
   Injectable,
   ConflictException,
   UnauthorizedException,
@@ -9,20 +10,22 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-
 import { Connection, Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
+import type { ClientSession } from 'mongoose';
+import { AuthAuditService } from './auth-audit.service';
 import { MailService } from './mail.service';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../interfaces/auth-audit.interface';
+import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 import { AuthSessionService } from './auth-session.service';
 import type { SessionRequestMetadata } from '../interfaces/auth-session.interface';
 import { generateUserPublicId } from '../../users/utils/generate-public-id';
-import {
-  DEFAULT_AVATAR_ID,
-  DEFAULT_NOTIFICATION_SETTINGS,
-  User,
-  type NotificationSettings,
-} from '../../users/schemas/user.schema';
+import { User } from '../../users/schemas/user.schema';
 import { SessionRevokeReason } from '../schemas/auth-session.schema';
 import {
   RegisterDto,
@@ -37,6 +40,8 @@ import {
   PublicUser,
   RegisterResponse,
 } from '../interfaces/auth.interface';
+import { normalizeAuthEmail } from '../../../common/utils/normalize-auth-email';
+import { toPublicAuthUser } from '../mappers/public-auth-user.mapper';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -69,6 +74,11 @@ interface MongoError {
   keyPattern?: Record<string, number>;
 }
 
+type FailedLoginAttemptResult = {
+  lockedUntil: Date | null;
+  didCreateLock: boolean;
+};
+
 function toMongoError(err: unknown): MongoError {
   if (typeof err === 'object' && err !== null) {
     return err as MongoError;
@@ -94,39 +104,32 @@ export class AuthService {
     private readonly mailService: MailService,
 
     private readonly authSessionService: AuthSessionService,
+
+    private readonly authAuditService: AuthAuditService,
   ) {}
 
   // ─────────────────────────────────────────────
   // PRIVATE HELPERS
   // ─────────────────────────────────────────────
 
-  private normalizeNotificationSettings(
-    settings?: Partial<NotificationSettings> | null,
-  ): NotificationSettings {
-    return {
-      enabled: settings?.enabled ?? DEFAULT_NOTIFICATION_SETTINGS.enabled,
-      follow: settings?.follow ?? DEFAULT_NOTIFICATION_SETTINGS.follow,
-      reaction: settings?.reaction ?? DEFAULT_NOTIFICATION_SETTINGS.reaction,
-      recap: settings?.recap ?? DEFAULT_NOTIFICATION_SETTINGS.recap,
-    };
-  }
+  private async runAuthSecurityTransaction<T>(
+    operation: (session: ClientSession) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.connection.transaction(operation);
+    } catch (error: unknown) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
 
-  private toPublicUser(user: User): PublicUser {
-    return {
-      id: user.publicId,
-      publicId: user.publicId,
-      username: user.username,
-      fullname: user.fullname,
-      email: user.email,
-      phone: user.phone,
-      avatar: user.avatar ?? null,
-      hasCustomAvatar: user.avatarId !== DEFAULT_AVATAR_ID,
-      streakCount: user.streakCount ?? 0,
-      status: user.status ?? 'active',
-      notificationSettings: this.normalizeNotificationSettings(
-        user.notificationSettings,
-      ),
-    };
+      if (isMongoInfrastructureError(error)) {
+        throw new ServiceUnavailableException(
+          'Không thể hoàn tất thao tác bảo mật',
+        );
+      }
+
+      throw error;
+    }
   }
 
   private async createUserWithPublicId(data: {
@@ -199,129 +202,170 @@ export class AuthService {
     userId: Types.ObjectId,
     now: Date,
   ): Promise<Date | null> {
-    const lockedUntil = new Date(now.getTime() + LOGIN_LOCK_DURATION_MS);
+    const nextLockedUntil = new Date(now.getTime() + LOGIN_LOCK_DURATION_MS);
+
     const failureWindowThreshold = new Date(
       now.getTime() - LOGIN_FAILURE_WINDOW_MS,
     );
 
-    /*
-     * Bắt đầu cửa sổ mới khi:
-     * - User chưa từng đăng nhập sai.
-     * - Cửa sổ 30 phút trước đã hết.
-     * - Tài khoản vừa hết thời gian khóa.
-     */
-    const shouldStartNewWindow = {
-      $or: [
-        {
-          $lte: [
-            {
-              $ifNull: ['$failedLoginWindowStartedAt', new Date(0)],
-            },
-            failureWindowThreshold,
-          ],
-        },
-        {
-          $and: [
-            {
-              $ne: [{ $ifNull: ['$lockedUntil', null] }, null],
-            },
-            { $lte: ['$lockedUntil', now] },
-          ],
-        },
-      ],
-    };
-
-    const updatedUser = await this.userModel
-      .findOneAndUpdate(
-        {
-          _id: userId,
-          isDeleted: false,
-          status: { $ne: 'banned' },
-
-          // Request trong lúc đang khóa không được kéo dài thời gian khóa.
-          $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
-        },
-        [
-          {
-            $set: {
-              failedLoginAttempts: {
-                $cond: [
-                  shouldStartNewWindow,
-                  1,
+    const result =
+      await this.runAuthSecurityTransaction<FailedLoginAttemptResult>(
+        async (session) => {
+          const shouldStartNewWindow = {
+            $or: [
+              {
+                $lte: [
                   {
-                    $add: [
+                    $ifNull: ['$failedLoginWindowStartedAt', new Date(0)],
+                  },
+                  failureWindowThreshold,
+                ],
+              },
+              {
+                $and: [
+                  {
+                    $ne: [
                       {
-                        $ifNull: ['$failedLoginAttempts', 0],
+                        $ifNull: ['$lockedUntil', null],
                       },
-                      1,
+                      null,
                     ],
                   },
-                ],
-              },
-              failedLoginWindowStartedAt: {
-                $cond: [
-                  shouldStartNewWindow,
-                  now,
-                  '$failedLoginWindowStartedAt',
-                ],
-              },
-            },
-          },
-          {
-            $set: {
-              lockedUntil: {
-                $cond: [
                   {
-                    $gte: ['$failedLoginAttempts', MAX_FAILED_LOGIN_ATTEMPTS],
+                    $lte: ['$lockedUntil', now],
                   },
-                  lockedUntil,
-                  '$$REMOVE',
                 ],
               },
-            },
-          },
-        ],
-        {
-          new: true,
-          updatePipeline: true,
+            ],
+          };
+
+          const updatedUser = await this.userModel
+            .findOneAndUpdate(
+              {
+                _id: userId,
+                isDeleted: false,
+                status: { $ne: 'banned' },
+                $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+              },
+              [
+                {
+                  $set: {
+                    failedLoginAttempts: {
+                      $cond: [
+                        shouldStartNewWindow,
+                        1,
+                        {
+                          $add: [
+                            {
+                              $ifNull: ['$failedLoginAttempts', 0],
+                            },
+                            1,
+                          ],
+                        },
+                      ],
+                    },
+                    failedLoginWindowStartedAt: {
+                      $cond: [
+                        shouldStartNewWindow,
+                        now,
+                        '$failedLoginWindowStartedAt',
+                      ],
+                    },
+                  },
+                },
+                {
+                  $set: {
+                    lockedUntil: {
+                      $cond: [
+                        {
+                          $gte: [
+                            '$failedLoginAttempts',
+                            MAX_FAILED_LOGIN_ATTEMPTS,
+                          ],
+                        },
+                        nextLockedUntil,
+                        '$$REMOVE',
+                      ],
+                    },
+                  },
+                },
+              ],
+              {
+                session,
+                returnDocument: 'after',
+                updatePipeline: true,
+              },
+            )
+            .select(
+              '+failedLoginAttempts ' +
+                '+failedLoginWindowStartedAt ' +
+                '+lockedUntil',
+            )
+            .exec();
+
+          if (!updatedUser) {
+            const currentLock = await this.userModel
+              .findOne(
+                {
+                  _id: userId,
+                  isDeleted: false,
+                },
+                null,
+                { session },
+              )
+              .select('+lockedUntil')
+              .lean()
+              .exec();
+
+            const activeLock =
+              currentLock?.lockedUntil &&
+              currentLock.lockedUntil.getTime() > now.getTime()
+                ? currentLock.lockedUntil
+                : null;
+
+            return {
+              lockedUntil: activeLock,
+              didCreateLock: false,
+            };
+          }
+
+          const activeLock =
+            updatedUser.lockedUntil &&
+            updatedUser.lockedUntil.getTime() > now.getTime()
+              ? updatedUser.lockedUntil
+              : null;
+
+          if (!activeLock) {
+            return {
+              lockedUntil: null,
+              didCreateLock: false,
+            };
+          }
+
+          await this.authAuditService.record({
+            eventCode: AuthAuditEventCode.ACCOUNT_LOCKED,
+            outcome: AuthAuditOutcome.SUCCEEDED,
+            reasonCode: AuthAuditReasonCode.LOGIN_FAILURE_THRESHOLD,
+            targetUserId: userId,
+            actorUserId: null,
+            mongoSession: session,
+          });
+
+          return {
+            lockedUntil: activeLock,
+            didCreateLock: true,
+          };
         },
-      )
-      .select('+failedLoginAttempts +failedLoginWindowStartedAt +lockedUntil')
-      .exec();
+      );
 
-    /*
-     * Trường hợp nhiều request đồng thời: một request khác có thể đã khóa
-     * tài khoản trước khi update này chạy. Chỉ query bổ sung ở race case.
-     */
-    if (!updatedUser) {
-      const currentLock = await this.userModel
-        .findOne({
-          _id: userId,
-          isDeleted: false,
-        })
-        .select('+lockedUntil')
-        .lean()
-        .exec();
-
-      return currentLock?.lockedUntil &&
-        currentLock.lockedUntil.getTime() > now.getTime()
-        ? currentLock.lockedUntil
-        : null;
-    }
-
-    const activeLockedUntil =
-      updatedUser.lockedUntil &&
-      updatedUser.lockedUntil.getTime() > now.getTime()
-        ? updatedUser.lockedUntil
-        : null;
-
-    if (activeLockedUntil) {
+    if (result.didCreateLock) {
       this.logger.warn(
-        `Account temporarily locked after repeated login failures: ${userId.toString()}`,
+        'Account temporarily locked after repeated login failures: ' +
+          userId.toString(),
       );
     }
 
-    return activeLockedUntil;
+    return result.lockedUntil;
   }
 
   private generateOtpCode(): string {
@@ -354,7 +398,7 @@ export class AuthService {
     const username = body.username.trim();
     const fullname = body.fullname.trim();
     const phone = body.phone.trim();
-    const email = body.email.trim().toLowerCase();
+    const email = normalizeAuthEmail(body.email);
     const password = body.password;
 
     const duplicate = await this.userModel
@@ -410,7 +454,7 @@ export class AuthService {
     body: LoginDto,
     metadata: SessionRequestMetadata,
   ): Promise<AuthResponse> {
-    const email = body.email.trim().toLowerCase();
+    const email = normalizeAuthEmail(body.email);
     const password = body.password;
     const now = new Date();
 
@@ -428,17 +472,19 @@ export class AuthService {
      * Luôn chạy bcrypt, kể cả email không tồn tại, để giảm chênh lệch
      * thời gian phản hồi có thể bị dùng để dò tài khoản.
      */
-    const passwordHash = user?.password ?? DUMMY_PASSWORD_HASH;
+    const localPasswordHash =
+      typeof user?.password === 'string' && user.password.length > 0
+        ? user.password
+        : undefined;
+
+    const passwordHash = localPasswordHash ?? DUMMY_PASSWORD_HASH;
+
     const isPasswordValid = await bcrypt.compare(password, passwordHash);
 
-    if (!user) {
+    if (!user || !localPasswordHash) {
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
-    /*
-     * Bcrypt đã được chạy trước đó để giảm timing difference.
-     * Mọi lần thử trong thời gian khóa đều nhận cùng contract countdown.
-     */
     if (this.isLoginLocked(user, now)) {
       this.throwLoginLocked(user.lockedUntil);
     }
@@ -543,7 +589,7 @@ export class AuthService {
     return {
       message: 'Đăng nhập thành công',
       ...tokens,
-      user: this.toPublicUser(authenticatedUser),
+      user: toPublicAuthUser(authenticatedUser),
     };
   }
 
@@ -562,12 +608,12 @@ export class AuthService {
       );
     }
 
-    return this.toPublicUser(user);
+    return toPublicAuthUser(user);
   }
 
   // BƯỚC 1: Gửi OTP
   async forgotPassword(body: ForgotPasswordDto) {
-    const email = body.email.trim().toLowerCase();
+    const email = normalizeAuthEmail(body.email);
 
     const user = await this.userModel
       .findOne({
@@ -640,7 +686,7 @@ export class AuthService {
 
   // BƯỚC 2: Verify OTP
   async verifyOtp(body: VerifyOtpDto) {
-    const email = body.email.trim().toLowerCase();
+    const email = normalizeAuthEmail(body.email);
     const user = await this.userModel
       .findOne({
         email,
@@ -686,7 +732,7 @@ export class AuthService {
 
   // BƯỚC 3: Đổi mật khẩu mới
   async resetPassword(body: ResetPasswordDto) {
-    const email = body.email.trim().toLowerCase();
+    const email = normalizeAuthEmail(body.email);
 
     const { otp, newPassword } = body;
 
@@ -707,7 +753,6 @@ export class AuthService {
           '+failedLoginAttempts',
           '+failedLoginWindowStartedAt',
           '+lockedUntil',
-          '+refreshToken',
         ].join(' '),
       )
       .exec();
@@ -747,10 +792,9 @@ export class AuthService {
       throw new BadRequestException('OTP không hợp lệ');
     }
 
-    const isSamePassword = await bcrypt.compare(
-      newPassword,
-      expectedPasswordHash,
-    );
+    const isSamePassword = expectedPasswordHash
+      ? await bcrypt.compare(newPassword, expectedPasswordHash)
+      : false;
 
     if (isSamePassword) {
       throw new BadRequestException(
@@ -762,14 +806,24 @@ export class AuthService {
 
     const userId = new Types.ObjectId(user._id.toString());
 
-    await this.connection.transaction(async (session) => {
+    const passwordVersionFilter = expectedPasswordHash
+      ? {
+          password: expectedPasswordHash,
+        }
+      : {
+          password: {
+            $exists: false,
+          },
+        };
+
+    await this.runAuthSecurityTransaction(async (session) => {
       const transactionNow = new Date();
 
       const updateResult = await this.userModel
         .updateOne(
           {
             _id: userId,
-            password: expectedPasswordHash,
+            ...passwordVersionFilter,
             forgotPasswordOtp: expectedOtpHash,
             forgotPasswordExpiry: {
               $gt: transactionNow,
@@ -792,7 +846,6 @@ export class AuthService {
           {
             $set: {
               password: newPasswordHash,
-              refreshToken: null,
               forgotPasswordAttempts: 0,
               failedLoginAttempts: 0,
             },
@@ -816,11 +869,24 @@ export class AuthService {
         );
       }
 
-      await this.authSessionService.revokeAllSessions(
-        userId,
-        SessionRevokeReason.PASSWORD_RESET,
-        session,
-      );
+      const affectedSessionCount =
+        await this.authSessionService.revokeAllSessions(
+          userId,
+          SessionRevokeReason.PASSWORD_RESET,
+          session,
+        );
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.PASSWORD_RESET,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.PASSWORD_RESET_COMPLETED,
+        targetUserId: userId,
+        actorUserId: null,
+        metadata: {
+          affectedSessionCount,
+        },
+        mongoSession: session,
+      });
     });
 
     this.logger.log(`User reset password: ${userId.toString()}`);
@@ -850,7 +916,7 @@ export class AuthService {
         isDeleted: false,
         status: 'active',
       })
-      .select('+password +refreshToken')
+      .select('+password')
       .exec();
 
     if (!user) {
@@ -860,6 +926,12 @@ export class AuthService {
     }
 
     const expectedPasswordHash = user.password;
+
+    if (!expectedPasswordHash) {
+      throw new BadRequestException(
+        'Tài khoản chưa thiết lập mật khẩu. Vui lòng dùng chức năng quên mật khẩu để tạo mật khẩu.',
+      );
+    }
 
     const isCurrentPasswordValid = await bcrypt.compare(
       currentPassword,
@@ -883,7 +955,7 @@ export class AuthService {
 
     const newPasswordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
-    await this.connection.transaction(async (session) => {
+    await this.runAuthSecurityTransaction(async (session) => {
       const updateResult = await this.userModel
         .updateOne(
           {
@@ -895,7 +967,6 @@ export class AuthService {
           {
             $set: {
               password: newPasswordHash,
-              refreshToken: null,
             },
           },
           {
@@ -911,11 +982,24 @@ export class AuthService {
         );
       }
 
-      await this.authSessionService.revokeAllSessions(
-        uid,
-        SessionRevokeReason.PASSWORD_CHANGED,
-        session,
-      );
+      const affectedSessionCount =
+        await this.authSessionService.revokeAllSessions(
+          uid,
+          SessionRevokeReason.PASSWORD_CHANGED,
+          session,
+        );
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.PASSWORD_CHANGED,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.PASSWORD_CHANGE_COMPLETED,
+        targetUserId: uid,
+        actorUserId: uid,
+        metadata: {
+          affectedSessionCount,
+        },
+        mongoSession: session,
+      });
     });
 
     this.logger.log(`User changed password: ${uid.toString()}`);
