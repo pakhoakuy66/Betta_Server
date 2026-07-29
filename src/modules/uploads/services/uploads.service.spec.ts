@@ -57,7 +57,7 @@ const VALID_FILE: UploadFileMock = {
 
 const CLOUDINARY_RESULT = {
   secure_url: 'https://example.com/image.webp',
-  public_id: 'betta/posts/image',
+  public_id: 'betta/betta-dev/posts/image',
   width: 1024,
   height: 768,
   format: 'webp',
@@ -67,27 +67,31 @@ const CLOUDINARY_RESULT = {
 const AVATAR_RESULT = {
   ...CLOUDINARY_RESULT,
   secure_url: 'https://example.com/avatar.webp',
-  public_id: 'betta/avatars/avatar',
+  public_id: 'betta/betta-dev/avatars/avatar',
 } as UploadApiResponse;
 
 const SYSTEM_REPORT_RESULT = {
   ...CLOUDINARY_RESULT,
   secure_url: 'https://example.com/evidence.webp',
-  public_id: 'betta/system-reports/evidence',
+  public_id: 'betta/betta-dev/system-reports/evidence',
 } as UploadApiResponse;
 
-const createConfig = (): ConfigService => {
-  const values: Record<string, string> = {
+type ConfigOverrides = Partial<Record<string, string | undefined>>;
+
+const createConfig = (overrides: ConfigOverrides = {}): ConfigService => {
+  const values: Record<string, string | undefined> = {
     CLOUDINARY_CLOUD_NAME: 'test-cloud',
     CLOUDINARY_API_KEY: 'test-key',
     CLOUDINARY_API_SECRET: 'test-secret',
+    CLOUDINARY_ROOT_FOLDER: 'betta/betta-dev',
+    ...overrides,
   };
 
   return {
     getOrThrow: jest.fn((key: string) => {
       const value = values[key];
 
-      if (!value) {
+      if (value === undefined) {
         throw new Error(`Missing config: ${key}`);
       }
 
@@ -112,8 +116,8 @@ const createUploadImplementation =
     return stream;
   };
 
-const createContext = () => {
-  const service = new UploadsService(createConfig());
+const createContext = (configOverrides: ConfigOverrides = {}) => {
+  const service = new UploadsService(createConfig(configOverrides));
 
   return { service };
 };
@@ -145,6 +149,30 @@ describe('UploadsService', () => {
         api_secret: 'test-secret',
         secure: true,
       });
+    });
+
+    it('accepts a valid nested Cloudinary root folder', () => {
+      expect(() =>
+        createContext({
+          CLOUDINARY_ROOT_FOLDER: 'betta/betta-dev',
+        }),
+      ).not.toThrow();
+    });
+
+    it.each([
+      '',
+      '/Betta/Betta-dev',
+      'Betta/Betta-dev/',
+      'Betta//Betta-dev',
+      'Betta/../Betta-dev',
+      'Betta\\Betta-dev',
+      'Betta/Betta dev',
+    ])('rejects invalid Cloudinary root folder: %s', (folder) => {
+      expect(() =>
+        createContext({
+          CLOUDINARY_ROOT_FOLDER: folder,
+        }),
+      ).toThrow('CLOUDINARY_ROOT_FOLDER phải là đường dẫn thư mục hợp lệ');
     });
   });
 
@@ -220,7 +248,8 @@ describe('UploadsService', () => {
 
       expect(uploadStreamMock).toHaveBeenCalledWith(
         {
-          folder: 'betta/posts',
+          asset_folder: 'betta/betta-dev/posts',
+          use_asset_folder_as_public_id_prefix: true,
           resource_type: 'image',
           overwrite: false,
           unique_filename: true,
@@ -231,7 +260,7 @@ describe('UploadsService', () => {
 
       expect(result).toEqual({
         url: 'https://example.com/image.webp',
-        publicId: 'betta/posts/image',
+        publicId: CLOUDINARY_RESULT.public_id,
         width: 1024,
         height: 768,
         format: 'webp',
@@ -250,12 +279,13 @@ describe('UploadsService', () => {
 
       expect(uploadStreamMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          folder: 'betta/avatars',
+          asset_folder: 'betta/betta-dev/avatars',
+          use_asset_folder_as_public_id_prefix: true,
         }),
         expect.any(Function),
       );
 
-      expect(result.publicId).toBe('betta/avatars/avatar');
+      expect(result.publicId).toBe(AVATAR_RESULT.public_id);
     });
 
     it('uploads report evidence to the system-report folder', async () => {
@@ -269,12 +299,13 @@ describe('UploadsService', () => {
 
       expect(uploadStreamMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          folder: 'betta/system-reports',
+          asset_folder: 'betta/betta-dev/system-reports',
+          use_asset_folder_as_public_id_prefix: true,
         }),
         expect.any(Function),
       );
 
-      expect(result.publicId).toBe('betta/system-reports/evidence');
+      expect(result.publicId).toBe(SYSTEM_REPORT_RESULT.public_id);
     });
 
     it('maps Cloudinary callback failure to a safe server error', async () => {
@@ -331,7 +362,7 @@ describe('UploadsService', () => {
         ]),
       ).rejects.toBeInstanceOf(InternalServerErrorException);
 
-      expect(destroyMock).toHaveBeenCalledWith('betta/posts/image', {
+      expect(destroyMock).toHaveBeenCalledWith(CLOUDINARY_RESULT.public_id, {
         resource_type: 'image',
         invalidate: true,
       });
@@ -376,13 +407,10 @@ describe('UploadsService', () => {
         ]),
       ).rejects.toBeInstanceOf(InternalServerErrorException);
 
-      expect(destroyMock).toHaveBeenCalledWith(
-        'betta/system-reports/evidence',
-        {
-          resource_type: 'image',
-          invalidate: true,
-        },
-      );
+      expect(destroyMock).toHaveBeenCalledWith(SYSTEM_REPORT_RESULT.public_id, {
+        resource_type: 'image',
+        invalidate: true,
+      });
     });
   });
 
