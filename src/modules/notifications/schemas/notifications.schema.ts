@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  generateNotificationPublicId,
+  isValidNotificationPublicId,
+} from '../utils/notification-public-id';
 
 export const NOTIFICATION_TTL_DAYS = 14;
 export const NOTIFICATION_TTL_MS = NOTIFICATION_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -17,6 +21,18 @@ export enum NotificationType {
   toObject: { virtuals: true },
 })
 export class Notification extends Document {
+  @Prop({
+    type: String,
+    required: true,
+    default: generateNotificationPublicId,
+    trim: true,
+    validate: {
+      validator: isValidNotificationPublicId,
+      message: 'Notification publicId is invalid',
+    },
+  })
+  publicId!: string;
+
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   recipientId!: Types.ObjectId;
 
@@ -77,5 +93,14 @@ NotificationSchema.index(
   {
     unique: true,
     sparse: true,
+  },
+);
+
+NotificationSchema.index(
+  { publicId: 1 },
+  {
+    unique: true,
+    sparse: true,
+    name: 'notifications_publicId_unique',
   },
 );

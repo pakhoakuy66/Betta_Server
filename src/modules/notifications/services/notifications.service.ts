@@ -18,6 +18,10 @@ import {
 } from '../schemas/notifications.schema';
 import { User } from '../../users/schemas/user.schema';
 import { NotificationsQueryDto } from '../dto/notifications-query.dto';
+import {
+  generateNotificationPublicId,
+  isValidNotificationPublicId,
+} from '../utils/notification-public-id';
 
 const MAX_VISIBLE_NOTIFICATION_ACTORS = 3;
 
@@ -80,20 +84,18 @@ type NotificationResponse = {
   actorCount: number;
   otherCount: number;
   content: string;
-  targetId?: string;
   targetPublicId?: string;
   isRead: boolean;
   createdAt: Date;
 };
 
 type NotificationLeanDocument = {
-  _id: Types.ObjectId;
+  publicId: string;
   type: NotificationType;
   actorIds: Types.ObjectId[];
   actorCount: number;
   otherCount: number;
   content: string;
-  targetId?: Types.ObjectId;
   targetPublicId?: string;
   isRead: boolean;
   createdAt: Date;
@@ -144,7 +146,7 @@ export class NotificationsService {
         .skip(skip)
         .limit(limit + 1)
         .select(
-          '_id type actorIds actorCount otherCount content targetId targetPublicId isRead createdAt',
+          'publicId type actorIds actorCount otherCount content targetPublicId isRead createdAt',
         )
         .lean<NotificationLeanDocument[]>()
         .exec(),
@@ -193,15 +195,22 @@ export class NotificationsService {
     };
   }
 
-  async markAsRead(userId: string, notificationId: string) {
+  async markAsRead(userId: string, notificationPublicId: string) {
     const userObjectId = this.toObjectId(userId);
-    const notificationObjectId = this.toObjectId(notificationId);
+
+    if (!isValidNotificationPublicId(notificationPublicId)) {
+      throw new BadRequestException('ID thông báo không hợp lệ');
+    }
+
+    const filter = {
+      publicId: notificationPublicId,
+      recipientId: userObjectId,
+    };
 
     const updateResult = await this.notificationModel
       .updateOne(
         {
-          _id: notificationObjectId,
-          recipientId: userObjectId,
+          ...filter,
           isRead: false,
         },
         {
@@ -216,19 +225,14 @@ export class NotificationsService {
       return {
         success: true,
         message: 'Đã đánh dấu thông báo là đã đọc',
-        data: {
-          modifiedCount: 1,
-        },
+        data: { modifiedCount: 1 },
       };
     }
 
     const existingNotification = await this.notificationModel
-      .findOne({
-        _id: notificationObjectId,
-        recipientId: userObjectId,
-      })
-      .select('_id')
-      .lean<{ _id: Types.ObjectId }>()
+      .findOne(filter)
+      .select('publicId')
+      .lean<{ publicId: string }>()
       .exec();
 
     if (!existingNotification) {
@@ -238,9 +242,7 @@ export class NotificationsService {
     return {
       success: true,
       message: 'Thông báo đã được đọc trước đó',
-      data: {
-        modifiedCount: 0,
-      },
+      data: { modifiedCount: 0 },
     };
   }
 
@@ -436,6 +438,7 @@ export class NotificationsService {
               filter: { dedupeKey },
               update: {
                 $setOnInsert: {
+                  publicId: generateNotificationPublicId(),
                   recipientId: target.recipientId,
                   type: NotificationType.RECAP,
                   actorIds: [],
@@ -501,6 +504,9 @@ export class NotificationsService {
             dedupeKey,
             isRead: false,
             expiresAt: this.buildExpiryDate(now),
+          },
+          $setOnInsert: {
+            publicId: generateNotificationPublicId(),
           },
         },
         {
@@ -568,6 +574,9 @@ export class NotificationsService {
     return [
       {
         $set: {
+          publicId: {
+            $ifNull: ['$publicId', generateNotificationPublicId()],
+          },
           recipientId: postOwnerId,
           type: NotificationType.REACTION,
           content: NOTIFICATION_CONTENT.REACTION,
@@ -755,13 +764,12 @@ export class NotificationsService {
       .filter((actor): actor is NotificationActorResponse => Boolean(actor));
 
     return {
-      id: notification._id.toString(),
+      id: notification.publicId,
       type: notification.type,
       actors,
       actorCount: notification.actorCount,
       otherCount: notification.otherCount,
       content: notification.content,
-      targetId: notification.targetId?.toString(),
       targetPublicId: notification.targetPublicId,
       isRead: notification.isRead,
       createdAt: notification.createdAt,
