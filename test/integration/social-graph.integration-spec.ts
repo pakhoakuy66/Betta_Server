@@ -306,6 +306,126 @@ describe('Social graph MongoDB integration', () => {
     ).toBe(true);
   });
 
+  it('paginates followers and following without duplicates or omissions', async () => {
+    const owner = await createUser('pagination_owner');
+    const pageSize = 20;
+    const totalUsers = 25;
+
+    const [followers, following] = await Promise.all([
+      Promise.all(
+        Array.from({ length: totalUsers }, (_, index) =>
+          createUser(`pagination_follower_${index}`),
+        ),
+      ),
+      Promise.all(
+        Array.from({ length: totalUsers }, (_, index) =>
+          createUser(`pagination_following_${index}`),
+        ),
+      ),
+    ]);
+
+    await relationshipModel.insertMany([
+      ...followers.map((follower) => ({
+        followerId: follower._id,
+        followingId: owner._id,
+      })),
+      ...following.map((target) => ({
+        followerId: owner._id,
+        followingId: target._id,
+      })),
+    ]);
+
+    const [
+      followersPageOne,
+      followersPageTwo,
+      followingPageOne,
+      followingPageTwo,
+    ] = await Promise.all([
+      relationshipService.getFollowers(
+        owner.publicId,
+        owner._id.toString(),
+        1,
+        pageSize,
+      ),
+      relationshipService.getFollowers(
+        owner.publicId,
+        owner._id.toString(),
+        2,
+        pageSize,
+      ),
+      relationshipService.getFollowing(
+        owner.publicId,
+        owner._id.toString(),
+        1,
+        pageSize,
+      ),
+      relationshipService.getFollowing(
+        owner.publicId,
+        owner._id.toString(),
+        2,
+        pageSize,
+      ),
+    ]);
+
+    expect(followersPageOne.pagination).toEqual({
+      total: totalUsers,
+      page: 1,
+      limit: pageSize,
+      totalPages: 2,
+      hasMore: true,
+    });
+
+    expect(followersPageTwo.pagination).toEqual({
+      total: totalUsers,
+      page: 2,
+      limit: pageSize,
+      totalPages: 2,
+      hasMore: false,
+    });
+
+    expect(followingPageOne.pagination).toEqual({
+      total: totalUsers,
+      page: 1,
+      limit: pageSize,
+      totalPages: 2,
+      hasMore: true,
+    });
+
+    expect(followingPageTwo.pagination).toEqual({
+      total: totalUsers,
+      page: 2,
+      limit: pageSize,
+      totalPages: 2,
+      hasMore: false,
+    });
+
+    expect(followersPageOne.data).toHaveLength(pageSize);
+    expect(followersPageTwo.data).toHaveLength(totalUsers - pageSize);
+    expect(followingPageOne.data).toHaveLength(pageSize);
+    expect(followingPageTwo.data).toHaveLength(totalUsers - pageSize);
+
+    const returnedFollowerIds = [
+      ...followersPageOne.data,
+      ...followersPageTwo.data,
+    ].map((user) => user.publicId);
+
+    const returnedFollowingIds = [
+      ...followingPageOne.data,
+      ...followingPageTwo.data,
+    ].map((user) => user.publicId);
+
+    expect(new Set(returnedFollowerIds).size).toBe(totalUsers);
+    expect(new Set(returnedFollowingIds).size).toBe(totalUsers);
+
+    expect([...returnedFollowerIds].sort()).toEqual(
+      followers.map((user) => user.publicId).sort(),
+    );
+
+    expect([...returnedFollowingIds].sort()).toEqual(
+      following.map((user) => user.publicId).sort(),
+    );
+  });
+
   it('blocks transactionally, removes both follow directions and updates counters', async () => {
     const firstUser = await createUser('block_a', {
       followersCount: 1,
