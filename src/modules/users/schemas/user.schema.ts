@@ -20,6 +20,14 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
 export const DEFAULT_AVATAR_URL =
   'https://res.cloudinary.com/dulmj9v6i/image/upload/v1774254440/user_1_bibjpn.jpg';
 
+export const USER_STATUS = {
+  ACTIVE: 'active',
+  BANNED: 'banned',
+  REPORTED: 'reported',
+} as const;
+
+export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
+
 @Schema({ timestamps: true }) // Tự động thêm createdAt, updatedAt
 export class User extends Document {
   @Prop({
@@ -50,8 +58,17 @@ export class User extends Document {
   })
   email!: string;
 
-  @Prop({ type: String, required: true })
-  password!: string;
+  @Prop({
+    type: String,
+    required: false,
+    select: false,
+    validate: {
+      validator: (value: unknown): boolean =>
+        value === undefined || (typeof value === 'string' && value.length > 0),
+      message: 'Password must be absent or a non-empty hash',
+    },
+  })
+  password?: string;
 
   @Prop({ default: DEFAULT_AVATAR_ID })
   avatarId!: string;
@@ -82,10 +99,10 @@ export class User extends Document {
 
   @Prop({
     type: String,
-    default: 'active',
-    enum: ['active', 'banned', 'reported'],
+    default: USER_STATUS.ACTIVE,
+    enum: Object.values(USER_STATUS),
   })
-  status!: string; // Phục vụ tính năng Báo cáo tài khoản (3.15)
+  status!: UserStatus; // Phục vụ tính năng Báo cáo tài khoản (3.15)
 
   // CÁC TRƯỜNG METADATA (Dùng để hiển thị nhanh ở Profile)
   @Prop({ type: Number, default: 0 })
@@ -157,10 +174,6 @@ export class User extends Document {
     _id: false,
   })
   notificationSettings!: NotificationSettings;
-
-  // Xử lý Refresh Token (Chuẩn Doanh Nghiệp)
-  @Prop({ type: String, default: null, select: false })
-  refreshToken?: string | null;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

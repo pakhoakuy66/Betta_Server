@@ -15,6 +15,11 @@ import { AuthGuard } from '@nestjs/passport';
 import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
 import { AuthService } from '../services/auth.service';
 import { AuthRateLimitService } from '../services/auth-rate-limit.service';
+import { createSuccessResponse } from '../../../common/interfaces/api-response.interface';
+import {
+  ApiStandardErrors,
+  ApiStandardSuccess,
+} from '../../../common/decorators/api-standard-response.decorator';
 import {
   RegisterDto,
   ForgotPasswordDto,
@@ -50,6 +55,8 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Đăng nhập hệ thống' })
+  @ApiStandardSuccess()
+  @ApiStandardErrors()
   @Post('login')
   async login(@Req() request: ExpressRequest, @Body() loginDto: LoginDto) {
     await this.rateLimit.consume(
@@ -58,7 +65,11 @@ export class AuthController {
       loginDto.email,
     );
 
-    return this.authService.login(loginDto);
+    const { message, ...session } = await this.authService.login(loginDto, {
+      userAgent: request.get('user-agent'),
+    });
+
+    return createSuccessResponse(session, message);
   }
 
   @ApiOperation({ summary: 'Yêu cầu gửi mã OTP quên mật khẩu' })
@@ -96,9 +107,13 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Làm mới Access Token' })
+  @ApiStandardSuccess()
+  @ApiStandardErrors()
   @Post('refresh-token')
   async refreshToken(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshToken(dto.refreshToken);
+    const tokens = await this.authService.refreshToken(dto.refreshToken);
+
+    return createSuccessResponse(tokens);
   }
 
   @ApiBearerAuth('access-token')
@@ -112,22 +127,33 @@ export class AuthController {
     return this.authService.changePassword(req.user._id, dto);
   }
 
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Đăng xuất hệ thống' })
-  @ApiBearerAuth('access-token') // Để hiện nút nhập Token trên Swagger
+  @ApiStandardSuccess()
+  @ApiStandardErrors()
   @UseGuards(AuthGuard('jwt'))
   @Post('logout')
   async logout(@Request() req: AuthenticatedRequest) {
-    // req.user được gán giá trị từ JwtStrategy.validate() của ông
-    const userId = req.user._id;
-    return this.authService.logout(userId);
+    const result = await this.authService.logout(
+      req.user._id,
+      req.user.sessionId,
+    );
+
+    return createSuccessResponse(null, result.message);
   }
 
   // API lấy thông tin cá nhân (Cần gửi Token lên Header)
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Lấy thông tin cá nhân hiện tại' })
+  @ApiOperation({
+    summary: 'Lấy thông tin cá nhân hiện tại',
+  })
+  @ApiStandardSuccess()
+  @ApiStandardErrors()
   @UseGuards(AuthGuard('jwt'))
   @Get('me')
-  getProfile(@Request() req: AuthenticatedRequest) {
-    return this.authService.getCurrentUser(req.user._id);
+  async getProfile(@Request() req: AuthenticatedRequest) {
+    const user = await this.authService.getCurrentUser(req.user._id);
+
+    return createSuccessResponse(user);
   }
 }

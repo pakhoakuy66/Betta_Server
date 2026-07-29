@@ -1,0 +1,38 @@
+export const GOOGLE_OAUTH_SESSION_HANDOFF_COLLECTION =
+  'auth_google_oauth_session_handoffs';
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_PAYLOAD_VERSION = 1;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_HASH_BASE64URL_LENGTH = 43;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_IV_BASE64URL_LENGTH = 16;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_AUTH_TAG_BASE64URL_LENGTH = 22;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_MAX_CIPHERTEXT_LENGTH = 32_768;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_HASH_INDEX =
+  'google_oauth_session_handoff_hash_unique';
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_TTL_INDEX =
+  'google_oauth_session_handoff_expiry_ttl';
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_REPLACEMENT_ERROR =
+  'Google OAuth session handoffs cannot be replaced';
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_BULK_WRITE_ERROR =
+  'Google OAuth session handoff bulk writes are not allowed';
+
+export const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_RAW_BYTES = 32;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_RAW_BASE64URL_LENGTH = 43;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_KEY_BYTES = 32;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_IV_BYTES = 12;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_AUTH_TAG_BYTES = 16;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_DEFAULT_TTL_SECONDS = 120;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_MIN_TTL_SECONDS = 60;
+export const GOOGLE_OAUTH_SESSION_HANDOFF_MAX_TTL_SECONDS = 300;
+
+export const GOOGLE_OAUTH_SESSION_HANDOFF_AAD_CONTEXT =
+  'betta.google-oauth.session-handoff';

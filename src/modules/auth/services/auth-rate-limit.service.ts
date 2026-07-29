@@ -6,21 +6,42 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
-import { createHmac } from 'crypto';
+import { createHmac } from 'node:crypto';
 import { Model } from 'mongoose';
+
 import { AuthRateLimit } from '../schemas/auth-rate-limit.schema';
 
-type Action = 'login' | 'forgot' | 'otp';
-type Policy = {
+type AccountAction = 'login' | 'forgot' | 'otp';
+
+type WindowPolicy = {
+  windowSeconds: number;
+};
+
+type AccountPolicy = WindowPolicy & {
   ipLimit: number;
   accountLimit: number;
-  windowSeconds: number;
+};
+
+type IpPolicy = WindowPolicy & {
+  limit: number;
+};
+
+type AuthenticatedActionPolicy = WindowPolicy & {
+  ipLimit: number;
+  userLimit: number;
 };
 
 @Injectable()
 export class AuthRateLimitService {
   private readonly secret: string;
-  private readonly policies: Record<Action, Policy>;
+
+  private readonly policies: Record<AccountAction, AccountPolicy>;
+
+  private readonly googleOAuthStartPolicy: IpPolicy;
+
+  private readonly googleOAuthSessionPolicy: IpPolicy;
+
+  private readonly googleOAuthUnlinkPolicy: AuthenticatedActionPolicy;
 
   constructor(
     @InjectModel(AuthRateLimit.name)
@@ -63,10 +84,47 @@ export class AuthRateLimitService {
         windowSeconds: this.readNumber(config, 'AUTH_OTP_WINDOW_SECONDS', 600),
       },
     };
+
+    this.googleOAuthStartPolicy = {
+      limit: this.readNumber(config, 'AUTH_GOOGLE_OAUTH_START_IP_LIMIT', 20),
+      windowSeconds: this.readNumber(
+        config,
+        'AUTH_GOOGLE_OAUTH_START_WINDOW_SECONDS',
+        900,
+      ),
+    };
+
+    this.googleOAuthSessionPolicy = {
+      limit: this.readNumber(config, 'AUTH_GOOGLE_OAUTH_SESSION_IP_LIMIT', 30),
+      windowSeconds: this.readNumber(
+        config,
+        'AUTH_GOOGLE_OAUTH_SESSION_WINDOW_SECONDS',
+        300,
+      ),
+    };
+
+    this.googleOAuthUnlinkPolicy = {
+      ipLimit: this.readNumber(config, 'AUTH_GOOGLE_OAUTH_UNLINK_IP_LIMIT', 20),
+      userLimit: this.readNumber(
+        config,
+        'AUTH_GOOGLE_OAUTH_UNLINK_USER_LIMIT',
+        8,
+      ),
+      windowSeconds: this.readNumber(
+        config,
+        'AUTH_GOOGLE_OAUTH_UNLINK_WINDOW_SECONDS',
+        900,
+      ),
+    };
   }
 
-  async consume(action: Action, ip: string, account: string): Promise<void> {
+  async consume(
+    action: AccountAction,
+    ip: string,
+    account: string,
+  ): Promise<void> {
     const policy = this.policies[action];
+
     const normalizedAccount = account.trim().toLowerCase();
 
     await Promise.all([
@@ -79,14 +137,61 @@ export class AuthRateLimitService {
     ]);
   }
 
+  consumeGoogleOAuthStart(ip: string): Promise<void> {
+    const policy = this.googleOAuthStartPolicy;
+
+    return this.hit(
+      `google-oauth-start:ip:${this.normalizeIp(ip)}`,
+      policy.limit,
+      policy,
+    );
+  }
+
+  consumeGoogleOAuthSession(ip: string): Promise<void> {
+    const policy = this.googleOAuthSessionPolicy;
+
+    return this.hit(
+      `google-oauth-session:ip:${this.normalizeIp(ip)}`,
+      policy.limit,
+      policy,
+    );
+  }
+
+  async consumeGoogleOAuthUnlink(
+    ip: string,
+    authenticatedUserId: string,
+  ): Promise<void> {
+    const policy = this.googleOAuthUnlinkPolicy;
+    const normalizedUserId = authenticatedUserId.trim();
+
+    if (normalizedUserId.length === 0) {
+      throw new TypeError('authenticatedUserId không hợp lệ');
+    }
+
+    await Promise.all([
+      this.hit(
+        `google-oauth-unlink:ip:${this.normalizeIp(ip)}`,
+        policy.ipLimit,
+        policy,
+      ),
+      this.hit(
+        `google-oauth-unlink:user:${normalizedUserId}`,
+        policy.userLimit,
+        policy,
+      ),
+    ]);
+  }
+
   private async hit(
     identity: string,
     limit: number,
-    policy: Policy,
+    policy: WindowPolicy,
   ): Promise<void> {
     const now = Date.now();
     const windowMs = policy.windowSeconds * 1000;
+
     const bucket = Math.floor(now / windowMs);
+
     const windowEnd = (bucket + 1) * windowMs;
 
     const keyHash = createHmac('sha256', this.secret)
@@ -99,12 +204,17 @@ export class AuthRateLimitService {
       record = await this.model.findOneAndUpdate(
         { keyHash },
         {
-          $inc: { count: 1 },
+          $inc: {
+            count: 1,
+          },
           $setOnInsert: {
             expiresAt: new Date(windowEnd),
           },
         },
-        { upsert: true, new: true },
+        {
+          upsert: true,
+          new: true,
+        },
       );
     } catch (error: unknown) {
       const duplicate =
@@ -113,12 +223,20 @@ export class AuthRateLimitService {
         'code' in error &&
         error.code === 11000;
 
-      if (!duplicate) throw error;
+      if (!duplicate) {
+        throw error;
+      }
 
       record = await this.model.findOneAndUpdate(
         { keyHash },
-        { $inc: { count: 1 } },
-        { new: true },
+        {
+          $inc: {
+            count: 1,
+          },
+        },
+        {
+          new: true,
+        },
       );
     }
 
@@ -144,7 +262,9 @@ export class AuthRateLimitService {
   }
 
   private normalizeIp(ip: string): string {
-    return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+    const normalized = ip.trim();
+
+    return normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
   }
 
   private readNumber(

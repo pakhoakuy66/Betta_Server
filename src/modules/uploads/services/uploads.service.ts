@@ -39,9 +39,23 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/webp',
 ]);
 
+const CLOUDINARY_FOLDER_SEGMENT_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
+
+const MAX_CLOUDINARY_FOLDER_DEPTH = 5;
+
+const CLOUDINARY_ASSET_FOLDER = {
+  POSTS: 'posts',
+  AVATARS: 'avatars',
+  SYSTEM_REPORTS: 'system-reports',
+} as const;
+
+type CloudinaryAssetFolder =
+  (typeof CLOUDINARY_ASSET_FOLDER)[keyof typeof CLOUDINARY_ASSET_FOLDER];
+
 @Injectable()
 export class UploadsService {
   private readonly logger = new Logger(UploadsService.name);
+  private readonly cloudinaryRootFolder: string;
 
   private getErrorMessage(error: unknown): string {
     if (error instanceof Error) {
@@ -56,6 +70,8 @@ export class UploadsService {
   }
 
   constructor(private readonly configService: ConfigService) {
+    this.cloudinaryRootFolder = this.resolveCloudinaryRootFolder();
+
     cloudinary.config({
       cloud_name: this.configService.getOrThrow<string>(
         'CLOUDINARY_CLOUD_NAME',
@@ -71,7 +87,10 @@ export class UploadsService {
   async uploadPostImage(file: UploadFile): Promise<UploadedImage> {
     this.validateImageFile(file);
 
-    const result = await this.uploadBuffer(file.buffer, 'betta/posts');
+    const result = await this.uploadBuffer(
+      file.buffer,
+      this.buildCloudinaryFolder(CLOUDINARY_ASSET_FOLDER.POSTS),
+    );
 
     return {
       url: result.secure_url,
@@ -88,13 +107,34 @@ export class UploadsService {
       throw new BadRequestException('Bài viết chỉ được phép có tối đa 3 ảnh');
     }
 
-    return Promise.all(files.map((file) => this.uploadPostImage(file)));
+    const results = await Promise.allSettled(
+      files.map((file) => this.uploadPostImage(file)),
+    );
+
+    const uploadedImages = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+
+    const failedResult = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    if (!failedResult) {
+      return uploadedImages;
+    }
+
+    await this.deleteImages(uploadedImages.map((image) => image.publicId));
+
+    throw failedResult.reason;
   }
 
   async uploadAvatar(file: UploadFile): Promise<UploadedImage> {
     this.validateImageFile(file);
 
-    const result = await this.uploadBuffer(file.buffer, 'betta/avatars');
+    const result = await this.uploadBuffer(
+      file.buffer,
+      this.buildCloudinaryFolder(CLOUDINARY_ASSET_FOLDER.AVATARS),
+    );
 
     return {
       url: result.secure_url,
@@ -169,7 +209,10 @@ export class UploadsService {
   async uploadSystemReportImage(file: UploadFile): Promise<UploadedImage> {
     this.validateImageFile(file);
 
-    const result = await this.uploadBuffer(file.buffer, 'betta/system-reports');
+    const result = await this.uploadBuffer(
+      file.buffer,
+      this.buildCloudinaryFolder(CLOUDINARY_ASSET_FOLDER.SYSTEM_REPORTS),
+    );
 
     return {
       url: result.secure_url,
@@ -190,18 +233,52 @@ export class UploadsService {
       );
     }
 
-    const uploadedImages: UploadedImage[] = [];
+    const results = await Promise.allSettled(
+      files.map((file) => this.uploadSystemReportImage(file)),
+    );
 
-    try {
-      for (const file of files) {
-        uploadedImages.push(await this.uploadSystemReportImage(file));
-      }
+    const uploadedImages = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
 
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    if (!failure) {
       return uploadedImages;
-    } catch (error) {
-      await this.deleteImages(uploadedImages.map((image) => image.publicId));
-      throw error;
     }
+
+    await this.deleteImages(uploadedImages.map((image) => image.publicId));
+
+    throw failure.reason;
+  }
+
+  private resolveCloudinaryRootFolder(): string {
+    const configuredFolder = this.configService
+      .getOrThrow<string>('CLOUDINARY_ROOT_FOLDER')
+      .trim();
+
+    const segments = configuredFolder.split('/');
+
+    const isValid =
+      segments.length > 0 &&
+      segments.length <= MAX_CLOUDINARY_FOLDER_DEPTH &&
+      segments.every((segment) =>
+        CLOUDINARY_FOLDER_SEGMENT_PATTERN.test(segment),
+      );
+
+    if (!isValid) {
+      throw new Error(
+        'CLOUDINARY_ROOT_FOLDER phải là đường dẫn thư mục hợp lệ, ví dụ Betta/Betta-dev',
+      );
+    }
+
+    return segments.join('/');
+  }
+
+  private buildCloudinaryFolder(folder: CloudinaryAssetFolder): string {
+    return `${this.cloudinaryRootFolder}/${folder}`;
   }
 
   private validateImageFile(file: UploadFile): void {
@@ -225,7 +302,8 @@ export class UploadsService {
     return new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
-          folder,
+          asset_folder: folder,
+          use_asset_folder_as_public_id_prefix: true,
           resource_type: 'image',
           overwrite: false,
           unique_filename: true,

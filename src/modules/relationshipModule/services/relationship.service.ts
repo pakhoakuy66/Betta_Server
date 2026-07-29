@@ -412,7 +412,7 @@ export class RelationshipService {
     const [followers, totalResult] = await Promise.all([
       this.relationshipModel.aggregate<RelationshipListUser>([
         ...activeFollowerStages,
-        { $sort: { createdAt: -1 } },
+        { $sort: { createdAt: -1, _id: -1 } },
         { $skip: skip },
         { $limit: limit },
         {
@@ -509,7 +509,7 @@ export class RelationshipService {
     const [following, totalResult] = await Promise.all([
       this.relationshipModel.aggregate<RelationshipListUser>([
         ...activeFollowingStages,
-        { $sort: { createdAt: -1 } },
+        { $sort: { createdAt: -1, _id: -1 } },
         { $skip: skip },
         { $limit: limit },
         {

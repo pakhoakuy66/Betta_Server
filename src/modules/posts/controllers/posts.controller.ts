@@ -24,12 +24,7 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { PostsService } from '../services/posts.service';
 import { CreatePostDto } from '../dto/create-post.dto';
 import { FeedQueryDto, ProfilePostsQueryDto } from '../dto/post-query.dto';
-
-type AuthenticatedRequest = {
-  user: {
-    _id: string;
-  };
-};
+import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
 
 type UploadFile = {
   buffer: Buffer;

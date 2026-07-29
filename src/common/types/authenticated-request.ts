@@ -1,8 +1,9 @@
 export type JwtRequestUser = {
   _id: string;
-  id?: string;
-  email?: string;
-  username?: string;
+  id: string;
+  email: string;
+  username: string;
+  sessionId: string;
 };
 
 export type AuthenticatedRequest = {

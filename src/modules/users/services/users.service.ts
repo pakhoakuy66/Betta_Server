@@ -1,4 +1,6 @@
 import {
+  HttpException,
+  ServiceUnavailableException,
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -28,6 +30,15 @@ import {
   UpdateNotificationSettingsDto,
   UpdateProfileDto,
 } from '../dto/users.dto';
+import { AuthSessionService } from '../../auth/services/auth-session.service';
+import { AuthAuditService } from '../../auth/services/auth-audit.service';
+import {
+  AuthAuditEventCode,
+  AuthAuditOutcome,
+  AuthAuditReasonCode,
+} from '../../auth/interfaces/auth-audit.interface';
+import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
+import { SessionRevokeReason } from '../../auth/schemas/auth-session.schema';
 import { UserProfileResponse } from '../interfaces/users.interface';
 import { UploadsService } from '../../uploads/services/uploads.service';
 import { Relationship } from '../../relationshipModule/schemas/relationship.schema';
@@ -167,6 +178,8 @@ export class UsersService {
     @InjectModel(ReportCooldown.name)
     private readonly reportCooldownModel: Model<ReportCooldown>,
     private readonly uploadsService: UploadsService,
+    private readonly authSessionService: AuthSessionService,
+    private readonly authAuditService: AuthAuditService,
   ) {}
 
   private isMongoErrorWithLabels(
@@ -210,10 +223,21 @@ export class UsersService {
       } catch (error) {
         lastError = error;
 
-        if (
-          !this.isTransientTransactionError(error) ||
-          attempt === DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES
-        ) {
+        const shouldRetry =
+          this.isTransientTransactionError(error) &&
+          attempt < DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES;
+
+        if (!shouldRetry) {
+          if (error instanceof HttpException) {
+            throw error;
+          }
+
+          if (isMongoInfrastructureError(error)) {
+            throw new ServiceUnavailableException(
+              'Không thể hoàn tất thao tác bảo mật',
+            );
+          }
+
           throw error;
         }
 
@@ -548,7 +572,7 @@ export class UsersService {
         { new: true, runValidators: true },
       )
       .select(
-        '-password -refreshToken -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
+        '-password -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
       )
       .lean()
       .exec();
@@ -603,7 +627,7 @@ export class UsersService {
         { new: true, runValidators: true },
       )
       .select(
-        '-password -refreshToken -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
+        '-password -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
       )
       .lean()
       .exec()
@@ -620,17 +644,8 @@ export class UsersService {
     const oldAvatarId = currentUser.avatarId;
 
     if (oldAvatarId && oldAvatarId !== DEFAULT_AVATAR_ID) {
-      try {
-        await this.uploadsService.deleteImage(oldAvatarId);
-      } catch (cleanupError: unknown) {
-        this.logger.warn(
-          `[AVATAR_CLEANUP_FAILED] Failed to delete old avatar ${oldAvatarId}: ${
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError)
-          }`,
-        );
-      }
+      // MongoDB đã commit; cleanup cũ không được giữ response của người dùng.
+      void this.uploadsService.deleteImage(oldAvatarId);
     }
 
     return {
@@ -650,7 +665,7 @@ export class UsersService {
         status: 'active',
       })
       .select(
-        '-password -refreshToken -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
+        '-password -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
       )
       .lean()
       .exec();
@@ -685,7 +700,7 @@ export class UsersService {
         { new: true, runValidators: true },
       )
       .select(
-        '-password -refreshToken -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
+        '-password -forgotPasswordOtp -forgotPasswordExpiry -isDeleted -deletedAt',
       )
       .lean()
       .exec();
@@ -891,7 +906,6 @@ export class UsersService {
             $set: {
               isDeleted: true,
               deletedAt: now,
-              refreshToken: null,
               followersCount: 0,
               followingCount: 0,
               postsCount: 0,
@@ -918,6 +932,25 @@ export class UsersService {
           'Không tìm thấy người dùng hoặc tài khoản đã bị xóa trước đó',
         );
       }
+
+      const affectedSessionCount =
+        await this.authSessionService.revokeAllSessions(
+          uid,
+          SessionRevokeReason.ACCOUNT_DELETED,
+          session,
+        );
+
+      await this.authAuditService.record({
+        eventCode: AuthAuditEventCode.ACCOUNT_DELETED,
+        outcome: AuthAuditOutcome.SUCCEEDED,
+        reasonCode: AuthAuditReasonCode.ACCOUNT_DELETION_COMPLETED,
+        targetUserId: uid,
+        actorUserId: uid,
+        metadata: {
+          affectedSessionCount,
+        },
+        mongoSession: session,
+      });
 
       const followings = await this.relationshipModel
         .find({ followerId: uid })
