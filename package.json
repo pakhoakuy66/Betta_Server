@@ -40,6 +40,8 @@
     "test:integration:google-oauth-http-transport": "jest --config ./test/jest-integration.json --runInBand --runTestsByPath test/integration/google-oauth-http-transport.integration-spec.ts",
     "notifications:public-id:dry-run": "node -r ts-node/register -r tsconfig-paths/register src/scripts/backfill-notification-public-id.ts",
     "notifications:public-id:run": "node -r ts-node/register -r tsconfig-paths/register src/scripts/backfill-notification-public-id.ts --execute",
+    "test:integration:admin-account-schema": "jest --config ./test/jest-integration.json --runInBand --runTestsByPath test/integration/admin-account-schema.integration-spec.ts",
+    "admin:secrets:validate": "node -r ts-node/register -r tsconfig-paths/register src/scripts/validate-admin-secrets.ts",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "dev": "nest start --watch",

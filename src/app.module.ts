@@ -19,6 +19,7 @@ import { RelationshipModule } from './modules/relationshipModule/relationship.mo
 import { BlockModule } from './modules/relationshipModule/block.module';
 import { CronModule } from './modules/cron/cron.module';
 import { ReactionModule } from './modules/reactions/reaction.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { ReactionModule } from './modules/reactions/reaction.module';
     BlockModule,
     CronModule,
     ReactionModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [
