@@ -5,7 +5,12 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { type Connection, type Model, Types } from 'mongoose';
+import {
+  type ClientSession,
+  type Connection,
+  type Model,
+  Types,
+} from 'mongoose';
 import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 import { ADMIN_POLICY, type AdminPolicy } from '../config/admin-policy.config';
 import {
@@ -304,6 +309,28 @@ export class AdminMfaService {
         adminPublicId,
         token,
         now,
+        undefined,
+      ),
+    );
+  }
+
+  async verifyTotpInTransaction(
+    adminAccountId: Types.ObjectId,
+    adminPublicId: string,
+    token: string,
+    mongoSession: ClientSession,
+    now = new Date(),
+  ): Promise<boolean> {
+    if (mongoSession?.inTransaction() !== true) {
+      throw new TypeError('Admin MFA verification yeu cau transaction active');
+    }
+    return Boolean(
+      await this.verifyTotpCredential(
+        adminAccountId,
+        adminPublicId,
+        token,
+        now,
+        mongoSession,
       ),
     );
   }
@@ -313,16 +340,20 @@ export class AdminMfaService {
     adminPublicId: string,
     token: string,
     now: Date,
+    mongoSession?: ClientSession,
   ): Promise<string | null> {
     this.assertIdentity(adminAccountId, adminPublicId);
     try {
-      const account = await this.accountModel
+      const accountQuery = this.accountModel
         .findOne({
           _id: adminAccountId,
           publicId: adminPublicId,
           mfaStatus: AdminMfaStatus.ACTIVE,
         })
-        .select('+encryptedTotpSecret +totpLastUsedStep')
+        .select('+encryptedTotpSecret +totpLastUsedStep');
+      if (mongoSession) accountQuery.session(mongoSession);
+
+      const account = await accountQuery
         .lean<Pick<AdminAccount, 'encryptedTotpSecret' | 'totpLastUsedStep'>>()
         .exec();
       if (!account?.encryptedTotpSecret) return null;
@@ -332,20 +363,23 @@ export class AdminMfaService {
       );
       const step = this.matchStep(secret, token, now);
       if (step === null) return null;
-      const result = await this.accountModel.updateOne(
-        {
-          _id: adminAccountId,
-          publicId: adminPublicId,
-          mfaStatus: AdminMfaStatus.ACTIVE,
-          encryptedTotpSecret: account.encryptedTotpSecret,
-          $or: [
-            { totpLastUsedStep: null },
-            { totpLastUsedStep: { $exists: false } },
-            { totpLastUsedStep: { $lt: step } },
-          ],
-        },
-        { $set: { totpLastUsedStep: step } },
-      );
+      const replayFilter = {
+        _id: adminAccountId,
+        publicId: adminPublicId,
+        mfaStatus: AdminMfaStatus.ACTIVE,
+        encryptedTotpSecret: account.encryptedTotpSecret,
+        $or: [
+          { totpLastUsedStep: null },
+          { totpLastUsedStep: { $exists: false } },
+          { totpLastUsedStep: { $lt: step } },
+        ],
+      };
+      const replayUpdate = { $set: { totpLastUsedStep: step } };
+      const result = mongoSession
+        ? await this.accountModel.updateOne(replayFilter, replayUpdate, {
+            session: mongoSession,
+          })
+        : await this.accountModel.updateOne(replayFilter, replayUpdate);
       return result.modifiedCount === 1 ? account.encryptedTotpSecret : null;
     } catch (error: unknown) {
       this.rethrow(error);

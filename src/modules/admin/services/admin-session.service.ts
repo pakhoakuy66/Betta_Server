@@ -415,6 +415,44 @@ export class AdminSessionService {
     });
   }
 
+  async revokeCurrentSession(
+    account: AdminSessionAccount,
+    currentSessionId: string,
+  ): Promise<boolean> {
+    this.assertAccount(account);
+    this.assertSessionId(currentSessionId);
+
+    return this.runSecurityTransaction(async (mongoSession) => {
+      const now = new Date();
+      const result = await this.sessionModel.updateOne(
+        {
+          adminAccountId: account._id,
+          adminPublicId: account.publicId,
+          publicId: currentSessionId,
+          revokedAt: null,
+          expiresAt: { $gt: now },
+        },
+        {
+          $set: {
+            revokedAt: now,
+            revokeReason: AdminSessionRevokeReason.LOGOUT,
+          },
+        },
+        { session: mongoSession, runValidators: true },
+      );
+
+      if (result.modifiedCount !== 1) return false;
+
+      await this.auditSessionRevocation(
+        this.toSelfAuditActor(account),
+        currentSessionId,
+        'admin_session_logout',
+        mongoSession,
+      );
+      return true;
+    });
+  }
+
   async logoutAllSelf(account: AdminSessionAccount): Promise<number> {
     this.assertAccount(account);
     return this.runSecurityTransaction((mongoSession) =>
@@ -464,7 +502,7 @@ export class AdminSessionService {
         },
         reasonCode: input.reason,
         metadata: { affectedSessionCount: result.modifiedCount },
-        source: AdminAuditSource.HTTP,
+        source: input.auditSource ?? AdminAuditSource.HTTP,
         mongoSession: input.mongoSession,
       });
     }

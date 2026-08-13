@@ -132,6 +132,25 @@ export class AdminLoginProtectionService {
   }
 
   async clearAccountFailures(accountKey: string): Promise<void> {
+    await this.clearAccountFailuresWithSession(accountKey);
+  }
+
+  async clearAccountFailuresInTransaction(
+    accountKey: string,
+    mongoSession: ClientSession,
+  ): Promise<void> {
+    if (mongoSession?.inTransaction() !== true) {
+      throw new TypeError(
+        'Admin login protection cleanup yeu cau transaction active',
+      );
+    }
+    await this.clearAccountFailuresWithSession(accountKey, mongoSession);
+  }
+
+  private async clearAccountFailuresWithSession(
+    accountKey: string,
+    mongoSession?: ClientSession,
+  ): Promise<void> {
     const locators = this.createProtectionLocators(
       AdminLoginProtectionScope.ACCOUNT,
       this.normalizeAccountKey(accountKey),
@@ -140,6 +159,7 @@ export class AdminLoginProtectionService {
     try {
       await this.model.deleteMany(
         this.createFilter(AdminLoginProtectionScope.ACCOUNT, locators),
+        { session: mongoSession },
       );
     } catch (error: unknown) {
       this.rethrowPublicError(error);

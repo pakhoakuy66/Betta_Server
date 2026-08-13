@@ -2,6 +2,7 @@ import { type ClientSession, type Types } from 'mongoose';
 import { AdminRole } from '../constants/admin-account.constants';
 import { type AdminAuditActorInput } from './admin-audit.interface';
 import { type AdminSessionRevokeReason } from '../constants/admin-session.constants';
+import { type AdminAuditSource } from '../constants/admin-audit.constants';
 
 export type AdminSessionAccount = Readonly<{
   _id: Types.ObjectId;
@@ -69,5 +70,6 @@ export type RevokeAdminSessionsInTransactionInput = Readonly<{
   targetAdminPublicId: string;
   reason: AdminSessionRevokeReason;
   auditActor: AdminAuditActorInput;
+  auditSource?: AdminAuditSource;
   mongoSession: ClientSession;
 }>;
