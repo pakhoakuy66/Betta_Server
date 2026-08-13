@@ -23,6 +23,7 @@ import { createAuthSecretMaterialBoundary } from '../../src/modules/admin/config
 import {
   ADMIN_ACCOUNT_COLLECTION,
   ADMIN_ACCOUNT_EMAIL_INDEX,
+  ADMIN_ACCOUNT_GLOBAL_LIST_INDEX,
   ADMIN_ACCOUNT_LIST_INDEX,
   ADMIN_ACCOUNT_PUBLIC_ID_INDEX,
   ADMIN_ACCOUNT_USERNAME_INDEX,
@@ -169,6 +170,7 @@ describe('AdminAccount MongoDB integration', () => {
         ADMIN_ACCOUNT_EMAIL_INDEX,
         ADMIN_ACCOUNT_USERNAME_INDEX,
         ADMIN_ACCOUNT_LIST_INDEX,
+        ADMIN_ACCOUNT_GLOBAL_LIST_INDEX,
       ]),
     );
     expect(

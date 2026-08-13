@@ -7,10 +7,12 @@ import {
 } from '../utils/generate-admin-public-id';
 import {
   ADMIN_ACCOUNT_EMAIL_INDEX,
+  ADMIN_ACCOUNT_GLOBAL_LIST_INDEX,
   ADMIN_ACCOUNT_LIST_INDEX,
   ADMIN_ACCOUNT_PUBLIC_ID_INDEX,
   ADMIN_ACCOUNT_USERNAME_INDEX,
   AdminAccount,
+  AdminAccountDeletionOrigin,
   AdminAccountSchema,
   AdminAccountStatus,
   AdminMfaStatus,
@@ -128,6 +130,100 @@ describe('AdminAccountSchema', () => {
     await expect(account.validate()).resolves.toBeUndefined();
   });
 
+  it('requires a locked account to retain activated credentials and lockedAt', async () => {
+    const valid = new AdminAccountModel({
+      ...activeSource(),
+      status: AdminAccountStatus.LOCKED,
+      lockedAt: new Date(),
+    });
+    const missingTimestamp = new AdminAccountModel({
+      ...activeSource(),
+      status: AdminAccountStatus.LOCKED,
+    });
+    const missingCredential = new AdminAccountModel({
+      ...activeSource(),
+      status: AdminAccountStatus.LOCKED,
+      lockedAt: new Date(),
+      passwordHash: undefined,
+    });
+
+    await expect(valid.validate()).resolves.toBeUndefined();
+    await expect(missingTimestamp.validate()).rejects.toMatchObject({
+      errors: { lockedAt: expect.anything() },
+    });
+    await expect(missingCredential.validate()).rejects.toMatchObject({
+      errors: { passwordHash: expect.anything() },
+    });
+  });
+
+  it('rejects an active account that retains administrative lock state', async () => {
+    const account = new AdminAccountModel({
+      ...activeSource(),
+      lockedAt: new Date(),
+    });
+
+    await expect(account.validate()).rejects.toMatchObject({
+      errors: { lockedAt: expect.anything() },
+    });
+  });
+
+  it('requires bounded Admin deletion metadata and rejects it on active state', async () => {
+    const deleted = new AdminAccountModel({
+      ...activeSource(),
+      status: AdminAccountStatus.SOFT_DELETED,
+      deletedAt: new Date(),
+      deletionOrigin: AdminAccountDeletionOrigin.ADMIN,
+    });
+    const missingOrigin = new AdminAccountModel({
+      ...activeSource(),
+      status: AdminAccountStatus.SOFT_DELETED,
+      deletedAt: new Date(),
+    });
+    const activeWithDeletion = new AdminAccountModel({
+      ...activeSource(),
+      deletedAt: new Date(),
+      deletionOrigin: AdminAccountDeletionOrigin.ADMIN,
+    });
+
+    await expect(deleted.validate()).resolves.toBeUndefined();
+    await expect(missingOrigin.validate()).rejects.toMatchObject({
+      errors: { deletionOrigin: expect.anything() },
+    });
+    await expect(activeWithDeletion.validate()).rejects.toMatchObject({
+      errors: { deletedAt: expect.anything() },
+    });
+  });
+
+  it('accepts the finite active-account MFA recovery states', async () => {
+    const resetRequired = new AdminAccountModel({
+      ...activeSource(),
+      mfaStatus: AdminMfaStatus.RESET_REQUIRED,
+      encryptedTotpSecret: undefined,
+      mustChangePassword: true,
+    });
+    const pendingRecovery = new AdminAccountModel({
+      ...activeSource(),
+      mfaStatus: AdminMfaStatus.PENDING_ENROLLMENT,
+      encryptedTotpSecret: undefined,
+      pendingEncryptedTotpSecret: 'pending-ciphertext',
+      pendingTotpEnrollmentExpiresAt: new Date(Date.now() + 900_000),
+    });
+
+    await expect(resetRequired.validate()).resolves.toBeUndefined();
+    await expect(pendingRecovery.validate()).resolves.toBeUndefined();
+  });
+
+  it('rejects recovery state that retains an old active TOTP secret', async () => {
+    const account = new AdminAccountModel({
+      ...activeSource(),
+      mfaStatus: AdminMfaStatus.RESET_REQUIRED,
+    });
+
+    await expect(account.validate()).rejects.toMatchObject({
+      errors: { status: expect.anything() },
+    });
+  });
+
   it('hides credentials, MFA, grants and internal versions by default', () => {
     const hiddenFields = [
       'passwordHash',
@@ -164,8 +260,12 @@ describe('AdminAccountSchema', () => {
     }
 
     expect(indexes).toContainEqual([
-      { status: 1, role: 1, createdAt: -1, _id: -1 },
+      { status: 1, role: 1, createdAt: -1, publicId: 1 },
       expect.objectContaining({ name: ADMIN_ACCOUNT_LIST_INDEX }),
+    ]);
+    expect(indexes).toContainEqual([
+      { createdAt: -1, publicId: 1 },
+      expect.objectContaining({ name: ADMIN_ACCOUNT_GLOBAL_LIST_INDEX }),
     ]);
     expect(
       indexes.every(([, options]) => options.expireAfterSeconds === undefined),

@@ -1,4 +1,5 @@
 import {
+  AdminAccountDeletionOrigin,
   AdminAccountStatus,
   AdminMfaStatus,
 } from '../constants/admin-account.constants';
@@ -14,6 +15,9 @@ export interface AdminAccountStateCandidate {
   activationGrantHash?: string;
   activationGrantExpiresAt?: Date;
   activationGrantConsumedAt?: Date | null;
+  lockedAt?: Date | null;
+  deletedAt?: Date | null;
+  deletionOrigin?: AdminAccountDeletionOrigin | null;
 }
 
 export interface AdminAccountStateViolation {
@@ -43,6 +47,10 @@ export function assertAdminAccountState(
   const hasGrantHash = isPresentString(candidate.activationGrantHash);
   const hasGrantExpiry = isValidDate(candidate.activationGrantExpiresAt);
   const hasConsumedAt = isValidDate(candidate.activationGrantConsumedAt);
+  const hasLockedAt = isValidDate(candidate.lockedAt);
+  const hasDeletedAt = isValidDate(candidate.deletedAt);
+  const hasDeletionOrigin =
+    candidate.deletionOrigin === AdminAccountDeletionOrigin.ADMIN;
   const hasPendingTotpSecret = isPresentString(
     candidate.pendingEncryptedTotpSecret,
   );
@@ -91,29 +99,93 @@ export function assertAdminAccountState(
     });
   }
 
-  if (candidate.status === AdminAccountStatus.ACTIVE) {
+  const isActivatedStatus =
+    candidate.status === AdminAccountStatus.ACTIVE ||
+    candidate.status === AdminAccountStatus.LOCKED ||
+    candidate.status === AdminAccountStatus.SOFT_DELETED;
+
+  if (
+    candidate.status === AdminAccountStatus.SOFT_DELETED &&
+    (!hasDeletedAt || !hasDeletionOrigin)
+  ) {
+    violations.push({
+      path: 'deletionOrigin',
+      message: 'Admin xóa mềm phải có thời điểm và nguồn xóa quản trị',
+    });
+  }
+
+  if (
+    candidate.status !== AdminAccountStatus.SOFT_DELETED &&
+    (hasDeletedAt || candidate.deletionOrigin != null)
+  ) {
+    violations.push({
+      path: 'deletedAt',
+      message: 'Admin chưa xóa không được giữ metadata xóa mềm',
+    });
+  }
+
+  if (candidate.status === AdminAccountStatus.LOCKED && !hasLockedAt) {
+    violations.push({
+      path: 'lockedAt',
+      message: 'Admin bị khóa phải có thời điểm khóa',
+    });
+  }
+
+  if (candidate.status === AdminAccountStatus.ACTIVE && hasLockedAt) {
+    violations.push({
+      path: 'lockedAt',
+      message: 'Admin active không được giữ thời điểm khóa',
+    });
+  }
+
+  if (candidate.status === AdminAccountStatus.SOFT_DELETED && hasLockedAt) {
+    violations.push({
+      path: 'lockedAt',
+      message: 'Admin xóa mềm không được đồng thời giữ trạng thái khóa',
+    });
+  }
+
+  if (isActivatedStatus) {
     if (!isPresentString(candidate.passwordHash)) {
       violations.push({
         path: 'passwordHash',
-        message: 'Admin active phải có password hash',
+        message: 'Admin đã activation phải có password hash',
       });
     }
 
+    const isAuthenticatedState =
+      !candidate.mustChangePassword &&
+      candidate.mfaStatus === AdminMfaStatus.ACTIVE &&
+      isPresentString(candidate.encryptedTotpSecret) &&
+      !hasPendingTotpSecret;
+    const isResetRequiredState =
+      candidate.mfaStatus === AdminMfaStatus.RESET_REQUIRED &&
+      !isPresentString(candidate.encryptedTotpSecret) &&
+      !hasPendingTotpSecret;
+    const isRecoveryEnrollmentState =
+      !candidate.mustChangePassword &&
+      candidate.mfaStatus === AdminMfaStatus.PENDING_ENROLLMENT &&
+      !isPresentString(candidate.encryptedTotpSecret) &&
+      hasPendingTotpSecret &&
+      hasPendingTotpExpiry;
+
     if (
-      candidate.mustChangePassword ||
-      candidate.mfaStatus !== AdminMfaStatus.ACTIVE ||
-      !isPresentString(candidate.encryptedTotpSecret)
+      !isAuthenticatedState &&
+      !isResetRequiredState &&
+      !isRecoveryEnrollmentState
     ) {
       violations.push({
         path: 'status',
-        message: 'Admin chỉ active sau khi đổi mật khẩu và kích hoạt MFA',
+        message:
+          'Admin đã activation phải ở trạng thái xác thực hoặc recovery được kiểm soát',
       });
     }
 
     if (hasGrantHash || hasGrantExpiry || !hasConsumedAt) {
       violations.push({
         path: 'activationGrantConsumedAt',
-        message: 'Admin active phải hoàn tất và xóa credential activation',
+        message:
+          'Admin đã activation phải hoàn tất và xóa credential activation',
       });
     }
   }

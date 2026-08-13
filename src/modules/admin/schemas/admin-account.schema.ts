@@ -1,6 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { type HydratedDocument } from 'mongoose';
 import {
+  AdminAccountDeletionOrigin,
   AdminAccountStatus,
   AdminMfaStatus,
   AdminRole,
@@ -15,6 +16,7 @@ import {
 } from '../utils/generate-admin-public-id';
 
 export {
+  AdminAccountDeletionOrigin,
   AdminAccountStatus,
   AdminMfaStatus,
   AdminRole,
@@ -25,7 +27,9 @@ export const ADMIN_ACCOUNT_PUBLIC_ID_INDEX = 'admin_accounts_publicId_unique';
 export const ADMIN_ACCOUNT_EMAIL_INDEX = 'admin_accounts_email_unique';
 export const ADMIN_ACCOUNT_USERNAME_INDEX = 'admin_accounts_username_unique';
 export const ADMIN_ACCOUNT_LIST_INDEX =
-  'admin_accounts_status_role_createdAt_id';
+  'admin_accounts_status_role_createdAt_publicId';
+export const ADMIN_ACCOUNT_GLOBAL_LIST_INDEX =
+  'admin_accounts_createdAt_publicId';
 
 const ADMIN_USERNAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{1,38}[a-z0-9])?$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -200,6 +204,13 @@ export class AdminAccount {
   @Prop({ type: Date, default: null })
   deletedAt?: Date | null;
 
+  @Prop({
+    type: String,
+    enum: AdminAccountDeletionOrigin,
+    default: null,
+  })
+  deletionOrigin?: AdminAccountDeletionOrigin | null;
+
   createdAt!: Date;
   updatedAt!: Date;
 }
@@ -221,8 +232,12 @@ AdminAccountSchema.index(
   { name: ADMIN_ACCOUNT_USERNAME_INDEX, unique: true },
 );
 AdminAccountSchema.index(
-  { status: 1, role: 1, createdAt: -1, _id: -1 },
+  { status: 1, role: 1, createdAt: -1, publicId: 1 },
   { name: ADMIN_ACCOUNT_LIST_INDEX },
+);
+AdminAccountSchema.index(
+  { createdAt: -1, publicId: 1 },
+  { name: ADMIN_ACCOUNT_GLOBAL_LIST_INDEX },
 );
 
 AdminAccountSchema.pre('validate', function enforceStateInvariants() {

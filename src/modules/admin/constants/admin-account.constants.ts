@@ -10,6 +10,10 @@ export enum AdminAccountStatus {
   SOFT_DELETED = 'SOFT_DELETED',
 }
 
+export enum AdminAccountDeletionOrigin {
+  ADMIN = 'ADMIN',
+}
+
 export enum AdminMfaStatus {
   NOT_ENROLLED = 'NOT_ENROLLED',
   PENDING_ENROLLMENT = 'PENDING_ENROLLMENT',
