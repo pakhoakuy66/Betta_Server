@@ -3,6 +3,7 @@ import {
   Get,
   type INestApplication,
   Req,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,7 +20,6 @@ import {
   it,
   jest,
 } from '@jest/globals';
-import { type Mock } from 'jest-mock';
 import { Types } from 'mongoose';
 import request from 'supertest';
 import { type App } from 'supertest/types';
@@ -48,16 +48,10 @@ import {
   ADMIN_JWT_ALGORITHM,
 } from '../constants/admin-auth-token.constants';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
-import { AdminAccount } from '../schemas/admin-account.schema';
 import { AdminAccessTokenService } from '../services/admin-access-token.service';
+import { AdminAuthorizationStateService } from '../services/admin-authorization-state.service';
 import { type AdminAuthenticatedRequest } from '../types/admin-authenticated-request';
 import { AdminJwtStrategy } from './admin-jwt.strategy';
-
-type QueryMock<T> = {
-  select: Mock<(projection: string) => QueryMock<T>>;
-  lean: Mock<() => QueryMock<T>>;
-  exec: Mock<() => Promise<T>>;
-};
 
 type AdminLookup = {
   _id: Types.ObjectId;
@@ -139,18 +133,41 @@ describe('Admin/User Nest Passport boundary', () => {
   let adminLookup: AdminLookup | null = ACTIVE_ADMIN;
   let adminLookupError: Error | undefined;
 
-  const adminModel = {
-    findOne: jest.fn(() => {
-      const query = {} as QueryMock<AdminLookup | null>;
-      query.select = jest.fn(() => query);
-      query.lean = jest.fn(() => query);
-      query.exec = jest.fn(() =>
-        adminLookupError
-          ? Promise.reject(adminLookupError)
-          : Promise.resolve(adminLookup),
-      );
-      return query;
-    }),
+  const authorizationState = {
+    resolvePrincipal: jest.fn(
+      (input: {
+        adminPublicId: string;
+        sessionPublicId: string;
+        credentialVersion: number;
+        authzVersion: number;
+        permissionVersion: number;
+      }) => {
+        if (adminLookupError) return Promise.reject(adminLookupError);
+        if (
+          !adminLookup ||
+          input.adminPublicId !== adminLookup.publicId ||
+          input.credentialVersion !== adminLookup.credentialVersion ||
+          input.authzVersion !== adminLookup.authzVersion ||
+          input.permissionVersion !== adminLookup.permissionVersion
+        ) {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(
+          Object.freeze({
+            adminAccountId: adminLookup._id.toHexString(),
+            id: adminLookup.publicId,
+            publicId: adminLookup.publicId,
+            username: adminLookup.username,
+            displayName: adminLookup.displayName,
+            role: adminLookup.role,
+            sessionId: input.sessionPublicId,
+            credentialVersion: adminLookup.credentialVersion,
+            authzVersion: adminLookup.authzVersion,
+            permissionVersion: adminLookup.permissionVersion,
+          }),
+        );
+      },
+    ),
   };
   const userModel = { findOne: jest.fn() };
   const authSessionService = { isSessionActive: jest.fn() };
@@ -166,7 +183,10 @@ describe('Admin/User Nest Passport boundary', () => {
         JwtStrategy,
         { provide: ADMIN_SECRETS, useValue: adminSecrets },
         { provide: ADMIN_POLICY, useValue: adminPolicy },
-        { provide: getModelToken(AdminAccount.name), useValue: adminModel },
+        {
+          provide: AdminAuthorizationStateService,
+          useValue: authorizationState,
+        },
         { provide: getModelToken(User.name), useValue: userModel },
         { provide: AuthSessionService, useValue: authSessionService },
         {
@@ -325,13 +345,13 @@ describe('Admin/User Nest Passport boundary', () => {
 
     const body = response.body as { message?: unknown };
     expect(body.message).toBe(ADMIN_AUTHENTICATION_FAILED_MESSAGE);
-    expect(adminModel.findOne).not.toHaveBeenCalled();
+    expect(authorizationState.resolvePrincipal).not.toHaveBeenCalled();
   });
 
   it('preserves DB infrastructure failure as sanitized 503', async () => {
-    adminLookupError = Object.assign(new Error('database unavailable'), {
-      name: 'MongoServerSelectionError',
-    });
+    adminLookupError = new ServiceUnavailableException(
+      'Dịch vụ xác thực quản trị tạm thời không khả dụng',
+    );
     const token = await issueAdminToken();
 
     const response = await request(app.getHttpServer())

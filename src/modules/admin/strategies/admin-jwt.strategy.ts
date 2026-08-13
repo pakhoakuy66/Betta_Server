@@ -1,14 +1,6 @@
-import {
-  Inject,
-  Injectable,
-  ServiceUnavailableException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
+import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
-import { type Model, Types } from 'mongoose';
 import { ExtractJwt, Strategy, type SecretOrKeyProvider } from 'passport-jwt';
-import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 import { ADMIN_POLICY, type AdminPolicy } from '../config/admin-policy.config';
 import {
   ADMIN_SECRETS,
@@ -16,38 +8,21 @@ import {
   type AdminSecrets,
 } from '../config/admin-secrets.config';
 import {
-  AdminAccountStatus,
-  AdminMfaStatus,
-  AdminRole,
-} from '../constants/admin-account.constants';
-import {
   ADMIN_ACCESS_TOKEN_AUDIENCE,
   ADMIN_ACCESS_TOKEN_CLOCK_SKEW_SECONDS,
   ADMIN_ACCESS_TOKEN_ISSUER,
   ADMIN_ACCESS_TOKEN_USE,
   ADMIN_AUTHENTICATION_FAILED_MESSAGE,
-  ADMIN_AUTHENTICATION_UNAVAILABLE_MESSAGE,
   ADMIN_JWT_ALGORITHM,
   ADMIN_JWT_STRATEGY,
   ADMIN_SESSION_PUBLIC_ID_PATTERN,
 } from '../constants/admin-auth-token.constants';
 import { type AdminAccessTokenClaims } from '../interfaces/admin-access-token.interface';
 import { type AdminRequestPrincipal } from '../types/admin-authenticated-request';
-import { AdminAccount } from '../schemas/admin-account.schema';
+import { AdminAuthorizationStateService } from '../services/admin-authorization-state.service';
 import { isValidAdminPublicId } from '../utils/generate-admin-public-id';
 
 type UnknownRecord = Record<string, unknown>;
-
-type AdminPrincipalAccount = {
-  _id: Types.ObjectId;
-  publicId: string;
-  username: string;
-  displayName: string;
-  role: AdminRole;
-  credentialVersion: number;
-  authzVersion: number;
-  permissionVersion: number;
-};
 
 const JWT_HEADER_SEGMENT_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
 const JWT_HEADER_KEYS = new Set(['alg', 'typ', 'kid']);
@@ -183,8 +158,7 @@ export class AdminJwtStrategy extends PassportStrategy(
   constructor(
     @Inject(ADMIN_SECRETS) adminSecrets: AdminSecrets,
     @Inject(ADMIN_POLICY) private readonly adminPolicy: AdminPolicy,
-    @InjectModel(AdminAccount.name)
-    private readonly adminAccountModel: Model<AdminAccount>,
+    private readonly authorizationState: AdminAuthorizationStateService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -206,58 +180,16 @@ export class AdminJwtStrategy extends PassportStrategy(
       throw this.unauthorized();
     }
 
-    let account: AdminPrincipalAccount | null;
-
-    try {
-      account = await this.adminAccountModel
-        .findOne({
-          publicId: payload.sub,
-          status: AdminAccountStatus.ACTIVE,
-          deletedAt: null,
-          mustChangePassword: false,
-          mfaStatus: AdminMfaStatus.ACTIVE,
-        })
-        .select(
-          '_id publicId username displayName role ' +
-            '+credentialVersion +authzVersion +permissionVersion',
-        )
-        .lean<AdminPrincipalAccount | null>()
-        .exec();
-    } catch (error: unknown) {
-      if (isMongoInfrastructureError(error)) {
-        throw new ServiceUnavailableException(
-          ADMIN_AUTHENTICATION_UNAVAILABLE_MESSAGE,
-        );
-      }
-
-      throw error;
-    }
-
-    if (
-      !account ||
-      !(account._id instanceof Types.ObjectId) ||
-      account.publicId !== payload.sub ||
-      (account.role !== AdminRole.ADMIN &&
-        account.role !== AdminRole.SUPER_ADMIN) ||
-      account.credentialVersion !== payload.credentialVersion ||
-      account.authzVersion !== payload.authzVersion ||
-      account.permissionVersion !== payload.permissionVersion
-    ) {
-      throw this.unauthorized();
-    }
-
-    return Object.freeze({
-      adminAccountId: account._id.toHexString(),
-      id: account.publicId,
-      publicId: account.publicId,
-      username: account.username,
-      displayName: account.displayName,
-      role: account.role,
-      sessionId: payload.sid,
-      credentialVersion: account.credentialVersion,
-      authzVersion: account.authzVersion,
-      permissionVersion: account.permissionVersion,
+    const principal = await this.authorizationState.resolvePrincipal({
+      adminPublicId: payload.sub,
+      sessionPublicId: payload.sid,
+      credentialVersion: payload.credentialVersion,
+      authzVersion: payload.authzVersion,
+      permissionVersion: payload.permissionVersion,
     });
+
+    if (!principal) throw this.unauthorized();
+    return principal;
   }
 
   private unauthorized(): UnauthorizedException {
