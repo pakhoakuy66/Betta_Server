@@ -116,6 +116,9 @@ const ACTIONS_WITHOUT_RBAC_PERMISSION: ReadonlySet<AdminAuditAction> = new Set([
   AdminAuditAction.MFA_ENROLLED,
   AdminAuditAction.MFA_RECOVERY_USED,
   AdminAuditAction.MFA_RESET,
+  AdminAuditAction.BREAK_GLASS_RECOVERY,
+  AdminAuditAction.REAUTH_GRANT_ISSUED,
+  AdminAuditAction.REAUTH_GRANT_CONSUMED,
 ]);
 
 const containsUnsafeControlCharacter = (value: string): boolean =>
