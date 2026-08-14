@@ -88,7 +88,13 @@ const validInput = (
     publicId: 'adm_23456789ABCE',
   },
   reasonCode: 'security_review',
-  metadata: { beforeVersion: 1, afterVersion: 2 },
+  metadata: {
+    beforeVersion: 1,
+    afterVersion: 2,
+    beforeState: 'ACTIVE',
+    afterState: 'LOCKED',
+    affectedSessionCount: 1,
+  },
   correlationId: 'req_23456789ABCDEFGH',
   source: AdminAuditSource.HTTP,
   mongoSession: activeTransactionSession(),
@@ -252,6 +258,44 @@ describe('AdminAuditService', () => {
     await expect(
       service.record(validInput({ reasonNote: 'Bearer token abc' })),
     ).rejects.toThrow('reasonNote chứa dữ liệu bị cấm');
+  });
+
+  it('rejects an incomplete lifecycle diff before persistence', async () => {
+    const { service, insertMany } = createContext();
+    await expect(
+      service.record(
+        validInput({
+          metadata: {
+            beforeVersion: 1,
+            afterVersion: 2,
+            beforeState: 'ACTIVE',
+            afterState: 'LOCKED',
+          },
+        }),
+      ),
+    ).rejects.toThrow(
+      'Admin lifecycle audit metadata thieu truong bat buoc: affectedSessionCount',
+    );
+    expect(insertMany).not.toHaveBeenCalled();
+  });
+
+  it('requires a version-only safe diff for reserved permission updates', async () => {
+    const { service, insertMany } = createContext();
+    await expect(
+      service.record(
+        validInput({
+          action: AdminAuditAction.ADMIN_PERMISSIONS_UPDATED,
+          actor: {
+            ...validInput().actor,
+            permission: AdminPermission.ADMINS_PERMISSIONS_UPDATE,
+          },
+          metadata: { beforeVersion: 1 },
+        }),
+      ),
+    ).rejects.toThrow(
+      'Admin lifecycle audit metadata thieu truong bat buoc: afterVersion',
+    );
+    expect(insertMany).not.toHaveBeenCalled();
   });
 
   it('maps non-transaction Mongo outage to 503 without logging raw error', async () => {

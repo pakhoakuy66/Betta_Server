@@ -61,6 +61,13 @@ describe('Admin audit store MongoDB integration', () => {
       publicId: 'adm_23456789ABCE',
     },
     reasonCode: 'security_review',
+    metadata: {
+      beforeVersion: 1,
+      afterVersion: 2,
+      beforeState: 'ACTIVE',
+      afterState: 'LOCKED',
+      affectedSessionCount: 1,
+    },
     source: AdminAuditSource.HTTP,
   });
 

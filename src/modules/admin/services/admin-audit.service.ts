@@ -21,6 +21,7 @@ import {
   AdminAuditSource,
   AdminAuditTargetType,
 } from '../constants/admin-audit.constants';
+import { getAdminLifecycleAuditPolicy } from '../constants/admin-lifecycle-audit.constants';
 import {
   type AdminAuditActorInput,
   type AdminAuditMetadataInput,
@@ -267,6 +268,7 @@ export class AdminAuditService {
       true,
     );
     const metadata = this.normalizeMetadata(input.metadata);
+    this.validateLifecycleContract(input.action, target.type, metadata);
 
     if (
       input.correlationId !== undefined &&
@@ -413,6 +415,25 @@ export class AdminAuditService {
       }
     }
     return Object.keys(normalized).length ? normalized : undefined;
+  }
+
+  private validateLifecycleContract(
+    action: AdminAuditAction,
+    targetType: AdminAuditTargetType,
+    metadata?: Record<string, unknown>,
+  ): void {
+    const policy = getAdminLifecycleAuditPolicy(action);
+    if (!policy) return;
+    if (policy.targetType !== targetType) {
+      throw new TypeError('Admin lifecycle audit target khong hop le');
+    }
+    for (const key of policy.requiredMetadata) {
+      if (metadata?.[key] === undefined) {
+        throw new TypeError(
+          `Admin lifecycle audit metadata thieu truong bat buoc: ${key}`,
+        );
+      }
+    }
   }
 
   private validateQuery(query: AdminAuditQuery): void {
