@@ -33,6 +33,8 @@ import {
   AuthAuditOutcome,
   AuthAuditReasonCode,
 } from '../interfaces/auth-audit.interface';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 
 jest.mock('bcrypt', () => ({
   compare: jest.fn(),
@@ -78,6 +80,8 @@ type UserFixture = {
   streakCount: number;
   status: string;
   isDeleted: boolean;
+  authzVersion: number;
+  restriction: User['restriction'];
   notificationSettings: NotificationSettings;
   failedLoginAttempts?: number;
   failedLoginWindowStartedAt?: Date | null;
@@ -128,6 +132,8 @@ const createUser = (overrides: Partial<UserFixture> = {}): UserFixture => ({
   streakCount: 5,
   status: 'active',
   isDeleted: false,
+  authzVersion: 0,
+  restriction: null,
   notificationSettings: {
     enabled: true,
     follow: true,
@@ -340,6 +346,14 @@ describe('AuthService', () => {
   });
 
   describe('login', () => {
+    const activeRestriction = {
+      type: UserRestrictionType.TEMPORARY_SUSPENSION,
+      effectiveAt: new Date(NOW.getTime() - 60_000),
+      expiresAt: new Date(NOW.getTime() + 60_000),
+      supportReference: 'sup_12345678',
+      publicReasonCode: 'community_policy_review',
+    };
+
     it('runs bcrypt with a dummy hash for an unknown email', async () => {
       const { service, userModel } = createContext();
 
@@ -388,6 +402,43 @@ describe('AuthService', () => {
       expect(context.connection.transaction).not.toHaveBeenCalled();
       expect(context.userModel.findOneAndUpdate).not.toHaveBeenCalled();
       expect(context.authAuditService.record).not.toHaveBeenCalled();
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps a restricted account generic when the password is wrong', async () => {
+      const user = createUser({ restriction: activeRestriction });
+      const context = createContext();
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(
+        createQuery({ ...user, failedLoginAttempts: 1 }),
+      );
+      compareMock.mockResolvedValue(false);
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'WrongPassword@1' },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(context.connection.transaction).toHaveBeenCalledTimes(1);
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
+    it('returns the public restriction only after the password is verified', async () => {
+      const user = createUser({ restriction: activeRestriction });
+      const context = createContext();
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      compareMock.mockResolvedValue(true);
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(AccountRestrictedException);
+
+      expect(context.connection.transaction).not.toHaveBeenCalled();
       expect(context.authSessionService.createSession).not.toHaveBeenCalled();
     });
 

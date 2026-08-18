@@ -19,6 +19,12 @@ describe('Admin lifecycle audit policy', () => {
       AdminAuditAction.ADMIN_UNLOCKED,
       AdminAuditAction.ADMIN_DELETED,
       AdminAuditAction.ADMIN_RESTORED,
+      AdminAuditAction.USER_SUSPENDED,
+      AdminAuditAction.USER_UNSUSPENDED,
+      AdminAuditAction.USER_BANNED,
+      AdminAuditAction.USER_UNBANNED,
+      AdminAuditAction.USER_DELETED,
+      AdminAuditAction.USER_RESTORED,
       AdminAuditAction.SESSION_REVOKED,
       AdminAuditAction.SESSIONS_REVOKED_ALL,
     ]);

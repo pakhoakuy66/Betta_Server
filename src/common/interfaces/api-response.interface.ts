@@ -14,6 +14,7 @@ export interface ApiErrorResponse {
   timestamp: string;
   path: string;
   retryAfterSeconds?: number;
+  publicRestriction?: PublicAccountRestriction;
 }
 
 export const createSuccessResponse = <T>(
@@ -24,3 +25,4 @@ export const createSuccessResponse = <T>(
   ...(message ? { message } : {}),
   data,
 });
+import type { PublicAccountRestriction } from '../security/public-account-restriction';

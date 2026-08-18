@@ -7,6 +7,10 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { ApiErrorResponse } from '../interfaces/api-response.interface';
+import {
+  ACCOUNT_RESTRICTED_ERROR,
+  normalizePublicAccountRestriction,
+} from '../security/public-account-restriction';
 
 const BAD_REQUEST_STATUS = 400;
 const NOT_FOUND_STATUS = 404;
@@ -85,6 +89,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
       statusCode === BAD_REQUEST_STATUS && Array.isArray(normalizedMessage);
 
     const retryAfterSeconds = normalizeRetryAfter(body.retryAfterSeconds);
+    const publicRestriction =
+      statusCode === 403 && body.error === ACCOUNT_RESTRICTED_ERROR
+        ? normalizePublicAccountRestriction(body.publicRestriction)
+        : undefined;
 
     const path = getPathname(request);
 
@@ -113,11 +121,14 @@ export class ApiExceptionFilter implements ExceptionFilter {
       statusCode,
       error: validationError
         ? 'VALIDATION_ERROR'
-        : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
+        : publicRestriction
+          ? ACCOUNT_RESTRICTED_ERROR
+          : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
       message,
       timestamp: new Date().toISOString(),
       path,
       ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+      ...(publicRestriction ? { publicRestriction } : {}),
     };
 
     if (statusCode >= INTERNAL_SERVER_ERROR_STATUS) {

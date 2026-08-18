@@ -10,6 +10,7 @@ export enum SessionRevokeReason {
   PASSWORD_RESET = 'password_reset',
   ACCOUNT_DELETED = 'account_deleted',
   ACCOUNT_BLOCKED = 'account_blocked',
+  ACCOUNT_RESTRICTED = 'account_restricted',
   REFRESH_REPLAY = 'refresh_replay',
   SESSION_REVOKED = 'session_revoked',
 }

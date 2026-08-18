@@ -21,6 +21,10 @@ import {
 import { toPublicAuthUser } from '../mappers/public-auth-user.mapper';
 import { AuthSessionService } from './auth-session.service';
 import { OAuthIdentityService } from './oauth-identity.service';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
+import { isActiveUserRestriction } from '../../users/utils/user-restriction';
+import type { UserRestriction } from '../../users/schemas/user.schema';
 
 const ACCOUNT_UNAVAILABLE_MESSAGE = 'Tài khoản không tồn tại hoặc đã bị khóa';
 
@@ -39,6 +43,8 @@ const AUTHENTICATED_USER_SELECTION = [
   'streakCount',
   'status',
   'notificationSettings',
+  '+authzVersion',
+  '+restriction',
 ].join(' ');
 
 type AuthenticatedGoogleUser = {
@@ -53,12 +59,15 @@ type AuthenticatedGoogleUser = {
   streakCount?: number;
   status?: typeof USER_STATUS.ACTIVE;
   notificationSettings?: User['notificationSettings'];
+  authzVersion: number;
+  restriction: UserRestriction | null;
 };
 
 type AccountState = {
   isDeleted: boolean;
   status: User['status'];
   lockedUntil?: Date | null;
+  restriction: UserRestriction | null;
 };
 
 type SignInTransactionResult =
@@ -119,12 +128,23 @@ export class GoogleOAuthSignInService {
                 _id: expectedUserId,
                 isDeleted: false,
                 status: USER_STATUS.ACTIVE,
-                $or: [
-                  { lockedUntil: null },
+                $and: [
                   {
-                    lockedUntil: {
-                      $lte: now,
-                    },
+                    $or: [
+                      { lockedUntil: null },
+                      { lockedUntil: { $lte: now } },
+                    ],
+                  },
+                  {
+                    $or: [
+                      { restriction: null },
+                      { restriction: { $exists: false } },
+                      {
+                        'restriction.type':
+                          UserRestrictionType.TEMPORARY_SUSPENSION,
+                        'restriction.expiresAt': { $lte: now },
+                      },
+                    ],
                   },
                 ],
               },
@@ -182,7 +202,7 @@ export class GoogleOAuthSignInService {
       }
 
       if (result.outcome === 'ACCOUNT_REJECTED') {
-        await this.throwIfAccountLocked(expectedUserId);
+        await this.throwIfAccountRejected(expectedUserId);
         throw this.accountUnavailable();
       }
 
@@ -202,16 +222,20 @@ export class GoogleOAuthSignInService {
     }
   }
 
-  private async throwIfAccountLocked(userId: Types.ObjectId): Promise<void> {
+  private async throwIfAccountRejected(userId: Types.ObjectId): Promise<void> {
     const user = await this.userModel
       .findById(userId)
-      .select('isDeleted status +lockedUntil')
+      .select('isDeleted status +lockedUntil +restriction')
       .lean<AccountState | null>()
       .exec();
 
+    if (!user || user.isDeleted) return;
+
+    if (isActiveUserRestriction(user.restriction)) {
+      throw new AccountRestrictedException(user.restriction);
+    }
+
     if (
-      !user ||
-      user.isDeleted ||
       user.status !== USER_STATUS.ACTIVE ||
       !user.lockedUntil ||
       user.lockedUntil.getTime() <= Date.now()

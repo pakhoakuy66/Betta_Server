@@ -1,6 +1,8 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { type ArgumentsHost, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
+import { AccountRestrictedException } from '../../modules/auth/exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../modules/users/constants/user-moderation.constants';
 
 describe('ApiExceptionFilter', () => {
   const createHost = (url = '/api/v1/test?token=secret') => {
@@ -166,6 +168,38 @@ describe('ApiExceptionFilter', () => {
         message: 'Không tìm thấy tài nguyên',
         path: '/api/v1/does-not-exist',
       }),
+    );
+  });
+
+  it('trả duy nhất public restriction allowlist cho credential đã kiểm soát', () => {
+    const { host, response } = createHost('/api/v1/auth/login');
+    const filter = new ApiExceptionFilter();
+
+    filter.catch(
+      new AccountRestrictedException({
+        type: UserRestrictionType.INDEFINITE_BAN,
+        effectiveAt: new Date('2026-08-17T00:00:00.000Z'),
+        expiresAt: null,
+        supportReference: 'sup_12345678',
+        publicReasonCode: 'policy_violation',
+      }),
+      host,
+    );
+
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 403,
+        error: 'ACCOUNT_RESTRICTED',
+        publicRestriction: {
+          type: UserRestrictionType.INDEFINITE_BAN,
+          effectiveAt: '2026-08-17T00:00:00.000Z',
+          expiresAt: null,
+          supportReference: 'sup_12345678',
+        },
+      }),
+    );
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain(
+      'policy_violation',
     );
   });
 });

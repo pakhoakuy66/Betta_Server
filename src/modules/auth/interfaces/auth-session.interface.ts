@@ -4,6 +4,7 @@ export type AccessTokenPayload = {
   sid: string;
   email: string;
   username: string;
+  authzVersion: number;
 };
 
 export type RefreshTokenPayload = {

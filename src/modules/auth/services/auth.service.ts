@@ -42,6 +42,9 @@ import {
 } from '../interfaces/auth.interface';
 import { normalizeAuthEmail } from '../../../common/utils/normalize-auth-email';
 import { toPublicAuthUser } from '../mappers/public-auth-user.mapper';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
+import { isActiveUserRestriction } from '../../users/utils/user-restriction';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -164,8 +167,18 @@ export class AuthService {
     );
   }
 
-  private ensureAccountCanUseAuth(user: Pick<User, 'isDeleted' | 'status'>) {
-    if (user.isDeleted || user.status === 'banned') {
+  private ensureAccountCanUseAuth(
+    user: Pick<User, 'isDeleted' | 'status' | 'restriction'>,
+  ) {
+    if (user.isDeleted) {
+      throw new UnauthorizedException(
+        'Tài khoản không tồn tại hoặc đã bị khóa',
+      );
+    }
+    if (isActiveUserRestriction(user.restriction)) {
+      throw new AccountRestrictedException(user.restriction);
+    }
+    if (user.status === 'banned') {
       throw new UnauthorizedException(
         'Tài khoản không tồn tại hoặc đã bị khóa',
       );
@@ -464,7 +477,8 @@ export class AuthService {
         isDeleted: false,
       })
       .select(
-        '+password +failedLoginAttempts +failedLoginWindowStartedAt +lockedUntil',
+        '+password +failedLoginAttempts +failedLoginWindowStartedAt ' +
+          '+lockedUntil +restriction +authzVersion',
       )
       .exec();
 
@@ -517,14 +531,23 @@ export class AuthService {
           {
             _id: user._id,
             password: user.password,
+            authzVersion: user.authzVersion,
             isDeleted: false,
             status: 'active',
-            $or: [
-              { lockedUntil: null },
+            $and: [
               {
-                lockedUntil: {
-                  $lte: now,
-                },
+                $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+              },
+              {
+                $or: [
+                  { restriction: null },
+                  { restriction: { $exists: false } },
+                  {
+                    'restriction.type':
+                      UserRestrictionType.TEMPORARY_SUSPENSION,
+                    'restriction.expiresAt': { $lte: now },
+                  },
+                ],
               },
             ],
           },
@@ -543,7 +566,7 @@ export class AuthService {
             runValidators: true,
           },
         )
-        .select('+password')
+        .select('+password +authzVersion +restriction')
         .exec();
 
       if (!authenticatedUser) {
@@ -570,13 +593,17 @@ export class AuthService {
     if (!loginResult) {
       const latestUser = await this.userModel
         .findById(user._id)
-        .select('+lockedUntil')
+        .select('+lockedUntil +restriction')
         .exec();
 
       const latestCheckTime = new Date();
 
       if (latestUser && this.isLoginLocked(latestUser, latestCheckTime)) {
         this.throwLoginLocked(latestUser.lockedUntil);
+      }
+
+      if (latestUser && isActiveUserRestriction(latestUser.restriction)) {
+        throw new AccountRestrictedException(latestUser.restriction);
       }
 
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);

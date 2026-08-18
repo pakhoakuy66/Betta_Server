@@ -7,12 +7,17 @@ import { Types } from 'mongoose';
 import type { AccessTokenPayload } from '../interfaces/auth-session.interface';
 import { AuthSessionService } from '../services/auth-session.service';
 import { User } from '../../users/schemas/user.schema';
+import type { UserRestriction } from '../../users/schemas/user.schema';
 import { JwtStrategy } from './jwt.strategy';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 
 type JwtUserLookup = {
   _id: Types.ObjectId;
   email: string;
   username: string;
+  authzVersion: number;
+  restriction: UserRestriction | null;
 };
 
 type QueryMock<T> = {
@@ -59,6 +64,7 @@ const validPayload: AccessTokenPayload = {
   sid: SESSION_ID,
   email: 'token@example.com',
   username: 'token_user',
+  authzVersion: 0,
 };
 
 describe('JwtStrategy', () => {
@@ -78,6 +84,7 @@ describe('JwtStrategy', () => {
     [{ ...validPayload, tokenUse: 'refresh' }],
     [{ ...validPayload, sub: 'invalid-id' }],
     [{ ...validPayload, sid: 'invalid-session' }],
+    [{ ...validPayload, authzVersion: -1 }],
   ])('rejects an invalid access payload', async (payload) => {
     const { strategy, userModel, authSessionService } = createContext();
 
@@ -106,6 +113,8 @@ describe('JwtStrategy', () => {
         _id: USER_ID,
         email: 'database@example.com',
         username: 'database_user',
+        authzVersion: 0,
+        restriction: null,
       }),
     );
     authSessionService.isSessionActive.mockResolvedValue(true);
@@ -138,5 +147,47 @@ describe('JwtStrategy', () => {
     authSessionService.isSessionActive.mockResolvedValue(true);
 
     await expect(strategy.validate(validPayload)).rejects.toBe(databaseError);
+  });
+
+  it('rejects a stale authorization version', async () => {
+    const { strategy, userModel, authSessionService } = createContext();
+    userModel.findOne.mockReturnValue(
+      createQuery<JwtUserLookup>({
+        _id: USER_ID,
+        email: 'database@example.com',
+        username: 'database_user',
+        authzVersion: 1,
+        restriction: null,
+      }),
+    );
+    authSessionService.isSessionActive.mockResolvedValue(true);
+
+    await expect(strategy.validate(validPayload)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('returns the public restriction only after a valid access token', async () => {
+    const { strategy, userModel, authSessionService } = createContext();
+    userModel.findOne.mockReturnValue(
+      createQuery<JwtUserLookup>({
+        _id: USER_ID,
+        email: 'database@example.com',
+        username: 'database_user',
+        authzVersion: 1,
+        restriction: {
+          type: UserRestrictionType.INDEFINITE_BAN,
+          effectiveAt: new Date('2026-08-17T00:00:00.000Z'),
+          expiresAt: null,
+          supportReference: 'sup_12345678',
+          publicReasonCode: 'policy_violation',
+        },
+      }),
+    );
+    authSessionService.isSessionActive.mockResolvedValue(false);
+
+    await expect(
+      strategy.validate({ ...validPayload, authzVersion: 1 }),
+    ).rejects.toBeInstanceOf(AccountRestrictedException);
   });
 });

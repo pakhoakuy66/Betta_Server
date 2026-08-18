@@ -185,6 +185,8 @@ const createUser = () => ({
   _id: new Types.ObjectId(),
   email: 'session@example.com',
   username: 'session_user',
+  authzVersion: 0,
+  restriction: null,
   status: 'active',
   isDeleted: false,
 });

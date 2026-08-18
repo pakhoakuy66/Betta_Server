@@ -26,6 +26,7 @@ import {
   USER_STATUS,
   User,
   type NotificationSettings,
+  type UserRestriction,
   type UserStatus,
 } from '../../users/schemas/user.schema';
 import type { SessionRequestMetadata } from '../interfaces/auth-session.interface';
@@ -34,6 +35,8 @@ import { GoogleOAuthSignInService } from './google-oauth-sign-in.service';
 import { OAuthIdentityService } from './oauth-identity.service';
 import type { IssuedGoogleOAuthSessionHandoff } from '../interfaces/google-oauth-session-handoff.interface';
 import { GoogleOAuthSessionHandoffService } from './google-oauth-session-handoff.service';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 
 const NOW = new Date('2026-07-25T08:00:00.000Z');
 const GOOGLE_SUBJECT = 'google-subject-123';
@@ -54,12 +57,15 @@ type AuthenticatedUserRecord = {
   streakCount?: number;
   status?: typeof USER_STATUS.ACTIVE;
   notificationSettings?: NotificationSettings;
+  authzVersion: number;
+  restriction?: UserRestriction | null;
 };
 
 type AccountState = {
   isDeleted: boolean;
   status: UserStatus;
   lockedUntil?: Date | null;
+  restriction?: UserRestriction | null;
 };
 
 type QueryStub<T> = {
@@ -110,6 +116,8 @@ const createContext = () => {
     streakCount: 3,
     status: USER_STATUS.ACTIVE,
     notificationSettings: DEFAULT_NOTIFICATION_SETTINGS,
+    authzVersion: 0,
+    restriction: null,
   };
 
   const selectedUserQuery = createQuery<AuthenticatedUserRecord | null>(user);
@@ -237,7 +245,7 @@ describe('GoogleOAuthSignInService', () => {
         _id: context.expectedUserId,
         isDeleted: false,
         status: USER_STATUS.ACTIVE,
-        $or: expect.any(Array),
+        $and: expect.any(Array),
       }),
       {
         $set: {
@@ -373,6 +381,29 @@ describe('GoogleOAuthSignInService', () => {
       }),
     );
 
+    expect(context.createSession).not.toHaveBeenCalled();
+  });
+
+  it('returns the public restriction only after Google identity verification', async () => {
+    const context = createContext();
+    context.selectedUserQuery.exec.mockResolvedValueOnce(null);
+    context.accountStateQuery.exec.mockResolvedValueOnce({
+      isDeleted: false,
+      status: USER_STATUS.ACTIVE,
+      lockedUntil: null,
+      restriction: {
+        type: UserRestrictionType.INDEFINITE_BAN,
+        effectiveAt: new Date(NOW.getTime() - 60_000),
+        expiresAt: null,
+        supportReference: 'sup_12345678',
+        publicReasonCode: 'community_policy_review',
+      },
+    });
+
+    await expect(context.signIn()).rejects.toBeInstanceOf(
+      AccountRestrictedException,
+    );
+    expect(context.resolveGoogleUserId).toHaveBeenCalled();
     expect(context.createSession).not.toHaveBeenCalled();
   });
 

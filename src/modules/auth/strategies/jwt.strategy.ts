@@ -1,6 +1,10 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -8,6 +12,10 @@ import type { JwtRequestUser } from '../../../common/types/authenticated-request
 import { User } from '../../users/schemas/user.schema';
 import type { AccessTokenPayload } from '../interfaces/auth-session.interface';
 import { AuthSessionService } from '../services/auth-session.service';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { isActiveUserRestriction } from '../../users/utils/user-restriction';
+import type { UserRestriction } from '../../users/schemas/user.schema';
+import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 import {
   ACCESS_TOKEN_AUDIENCE,
   AUTH_JWT_ALGORITHM,
@@ -18,6 +26,8 @@ type JwtUserLookup = {
   _id: Types.ObjectId;
   email: string;
   username: string;
+  authzVersion: number;
+  restriction: UserRestriction | null;
 };
 
 @Injectable()
@@ -59,23 +69,40 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (
       payload.tokenUse !== 'access' ||
       !Types.ObjectId.isValid(payload.sub) ||
-      !validSessionId
+      !validSessionId ||
+      !Number.isSafeInteger(payload.authzVersion) ||
+      payload.authzVersion < 0
     ) {
       throw new UnauthorizedException('Phiên đăng nhập không hợp lệ');
     }
 
     const userId = new Types.ObjectId(payload.sub);
 
-    const [user, sessionActive] = await Promise.all([
-      this.userModel
-        .findOne({ _id: userId, isDeleted: false, status: 'active' })
-        .select('_id email username')
-        .lean<JwtUserLookup>()
-        .exec(),
-      this.authSessionService.isSessionActive(userId, payload.sid),
-    ]);
+    let user: JwtUserLookup | null;
+    let sessionActive: boolean;
+    try {
+      [user, sessionActive] = await Promise.all([
+        this.userModel
+          .findOne({ _id: userId, isDeleted: false, status: 'active' })
+          .select('_id email username +authzVersion +restriction')
+          .lean<JwtUserLookup | null>()
+          .exec(),
+        this.authSessionService.isSessionActive(userId, payload.sid),
+      ]);
+    } catch (error: unknown) {
+      if (isMongoInfrastructureError(error)) {
+        throw new ServiceUnavailableException(
+          'Dịch vụ xác thực tạm thời không khả dụng',
+        );
+      }
+      throw error;
+    }
 
-    if (!user || !sessionActive) {
+    if (user && isActiveUserRestriction(user.restriction)) {
+      throw new AccountRestrictedException(user.restriction);
+    }
+
+    if (!user || !sessionActive || user.authzVersion !== payload.authzVersion) {
       throw new UnauthorizedException('Phiên đăng nhập không còn hợp lệ');
     }
 

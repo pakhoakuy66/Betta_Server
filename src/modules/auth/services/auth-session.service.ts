@@ -37,6 +37,8 @@ import {
   REFRESH_TOKEN_AUDIENCE,
 } from '../constants/auth-token.constants';
 import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { isActiveUserRestriction } from '../../users/utils/user-restriction';
 
 const DEFAULT_ACCESS_TTL_SECONDS = 15 * 60;
 const DEFAULT_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -52,7 +54,7 @@ export type AuthTokenPair = {
   refresh_token: string;
 };
 
-type SessionUser = Pick<User, '_id' | 'email' | 'username'>;
+type SessionUser = Pick<User, '_id' | 'email' | 'username' | 'authzVersion'>;
 type ActiveSessionRecord = Pick<
   AuthSession,
   'publicId' | 'deviceLabel' | 'createdAt' | 'lastUsedAt' | 'expiresAt'
@@ -116,6 +118,9 @@ export class AuthSessionService {
     metadata: SessionRequestMetadata,
     mongoSession?: ClientSession,
   ): Promise<AuthTokenPair> {
+    if (!Number.isSafeInteger(user.authzVersion) || user.authzVersion < 0) {
+      throw new TypeError('User authzVersion không hợp lệ');
+    }
     const now = new Date();
     const sessionId = `ses_${randomUUID()}`;
     const tokenFamily = randomUUID();
@@ -212,7 +217,7 @@ export class AuthSessionService {
 
     const user = await this.userModel
       .findById(userId)
-      .select('_id email username status isDeleted')
+      .select('_id email username status isDeleted +authzVersion +restriction')
       .exec();
 
     if (!user || user.isDeleted) {
@@ -224,6 +229,16 @@ export class AuthSessionService {
       );
 
       throw new UnauthorizedException(INVALID_REFRESH_MESSAGE);
+    }
+
+    if (isActiveUserRestriction(user.restriction, now)) {
+      await this.revokeSession(
+        session.publicId,
+        session.tokenFamily,
+        SessionRevokeReason.ACCOUNT_RESTRICTED,
+        now,
+      );
+      throw new AccountRestrictedException(user.restriction);
     }
 
     if (user.status !== ACTIVE_USER_STATUS) {
@@ -592,6 +607,7 @@ export class AuthSessionService {
       sid: sessionId,
       email: user.email,
       username: user.username,
+      authzVersion: user.authzVersion,
     };
 
     return this.jwtService.sign(payload, {
