@@ -9,6 +9,7 @@ const APP_ENVIRONMENTS = new Set<AppEnvironment>([
 ]);
 
 const DEFAULT_DEVELOPER_ORIGIN = 'http://localhost:5173';
+const DEFAULT_DEVELOPER_SWAGGER_ORIGIN = 'http://localhost:5000';
 
 export const parseExactOrigins = (
   rawValue: string,
@@ -77,8 +78,12 @@ export const readExactCorsOrigins = (
     throw new Error('CORS_ALLOWED_ORIGINS là bắt buộc trong production');
   }
 
-  return parseExactOrigins(
+  const origins = parseExactOrigins(
     configuredOrigins || DEFAULT_DEVELOPER_ORIGIN,
     environment,
   );
+
+  if (environment !== 'developer') return origins;
+
+  return [...new Set([...origins, DEFAULT_DEVELOPER_SWAGGER_ORIGIN])];
 };

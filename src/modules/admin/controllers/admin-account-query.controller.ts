@@ -16,7 +16,7 @@ import { AdminAccountQueryService } from '../services/admin-account-query.servic
 import { ADMIN_PUBLIC_ID_PATTERN } from '../utils/generate-admin-public-id';
 
 @ApiTags('SuperAdmin Accounts')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @Controller('super-admin/admins')
 @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
 @RequireAdminPermissions(AdminPermission.ADMINS_VIEW)

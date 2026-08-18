@@ -18,7 +18,7 @@ import { AdminAuditService } from '../services/admin-audit.service';
 import { type AdminAuthenticatedRequest } from '../types/admin-authenticated-request';
 
 @ApiTags('SuperAdmin Audit')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @Controller('super-admin/audit-logs')
 @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
 @RequireAdminPermissions(AdminPermission.AUDIT_LOGS_VIEW)

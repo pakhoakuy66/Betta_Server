@@ -47,27 +47,31 @@ async function bootstrap() {
   // Các API từ giờ sẽ phải gọi dưới dạng: http://localhost:5000/api/v1/auth/register
   app.setGlobalPrefix('api/v1');
 
-  // --- BỔ SUNG: CẤU HÌNH SWAGGER (Chuẩn doanh nghiệp) ---
-  const config = new DocumentBuilder()
-    .setTitle('Betta Social Network API')
-    .setDescription('Tài liệu API cho hệ thống mạng xã hội Betta - Soundstory')
-    .setVersion('1.0')
-    .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        name: 'JWT',
-        description: 'Nhập Token vào đây',
-        in: 'header',
-      },
-      'access-token', // Tên này phải khớp với bên Controller nếu dùng @ApiBearerAuth()
-    )
-    .build();
+  const environment = configService.get<string>('NODE_ENV')?.trim();
 
-  const document = SwaggerModule.createDocument(app, config);
-  // Đường dẫn xem tài liệu sẽ là: http://localhost:5000/api/v1/docs
-  SwaggerModule.setup('api/v1/docs', app, document);
+  if (environment !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Betta Social Network API')
+      .setDescription(
+        'Tài liệu API cho hệ thống mạng xã hội Betta - Soundstory',
+      )
+      .setVersion('1.0')
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          name: 'JWT',
+          description: 'Nhập Token vào đây',
+          in: 'header',
+        },
+        'access-token',
+      )
+      .build();
+
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/v1/docs', app, document);
+  }
 
   // 4. Kích hoạt ValidationPipe (Lá chắn thép ngăn ngừa Data rác)
   app.useGlobalPipes(
@@ -88,7 +92,9 @@ async function bootstrap() {
   logger.log(
     `Betta Backend đang bốc cháy tại: http://localhost:${port}/api/v1`,
   );
-  logger.log(`Swagger Docs: http://localhost:${port}/api/v1/docs`);
+  if (environment !== 'production') {
+    logger.log(`Swagger Docs: http://localhost:${port}/api/v1/docs`);
+  }
   logger.log(`==========================================================`);
 }
 void bootstrap();

@@ -113,7 +113,7 @@ export class AdminAuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @UseGuards(AdminCsrfGuard, AdminJwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Dang xuat phien Admin hien tai' })
   async logout(
     @Req() request: AdminAuthenticatedRequest,
@@ -131,7 +131,7 @@ export class AdminAuthController {
 
   @Get('me')
   @UseGuards(AdminJwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Lay principal Admin hien tai' })
   me(
     @Req() request: AdminAuthenticatedRequest,
@@ -150,7 +150,7 @@ export class AdminAuthController {
 
   @Get('sessions')
   @UseGuards(AdminJwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Liet ke cac phien Admin dang hoat dong' })
   async listSessions(
     @Query() query: ListAdminSessionsQueryDto,
@@ -170,7 +170,7 @@ export class AdminAuthController {
   @Delete('sessions/:sessionId')
   @HttpCode(HttpStatus.OK)
   @UseGuards(AdminJwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Thu hoi mot phien Admin khac' })
   async revokeSession(
     @Param() params: AdminSessionParamsDto,
@@ -189,7 +189,7 @@ export class AdminAuthController {
   @Post('logout-all')
   @HttpCode(HttpStatus.OK)
   @UseGuards(AdminJwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Thu hoi tat ca phien cua Admin hien tai' })
   async logoutAll(
     @Req() request: AdminAuthenticatedRequest,

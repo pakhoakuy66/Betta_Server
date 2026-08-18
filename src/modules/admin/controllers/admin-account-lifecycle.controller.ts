@@ -32,7 +32,7 @@ import { type AdminAuthenticatedRequest } from '../types/admin-authenticated-req
 import { getAdminTrustedClientIp } from '../utils/get-admin-trusted-client-ip';
 
 @ApiTags('SuperAdmin Accounts')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @Controller('super-admin/admins')
 @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
 @RequireAdminPermissions(AdminPermission.ADMINS_CREATE)

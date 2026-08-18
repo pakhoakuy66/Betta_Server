@@ -36,13 +36,26 @@ describe('exact-origin config', () => {
     ]);
   });
 
-  it('uses only the developer localhost default when config is absent', () => {
+  it('includes the frontend and local Swagger origins in developer mode', () => {
     const configService = new ConfigService({
       NODE_ENV: 'developer',
     });
 
     expect(readExactCorsOrigins(configService)).toEqual([
       'http://localhost:5173',
+      'http://localhost:5000',
+    ]);
+  });
+
+  it('adds local Swagger to explicitly configured developer origins', () => {
+    const configService = new ConfigService({
+      NODE_ENV: 'developer',
+      CORS_ALLOWED_ORIGINS: 'http://localhost:5173',
+    });
+
+    expect(readExactCorsOrigins(configService)).toEqual([
+      'http://localhost:5173',
+      'http://localhost:5000',
     ]);
   });
 

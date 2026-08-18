@@ -35,7 +35,7 @@ import { getAdminTrustedClientIp } from '../utils/get-admin-trusted-client-ip';
 import { ADMIN_PUBLIC_ID_PATTERN } from '../utils/generate-admin-public-id';
 
 @ApiTags('SuperAdmin Accounts')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @Controller('super-admin/admins')
 @UseGuards(AdminJwtAuthGuard)
 export class AdminAccountDeletionController {
