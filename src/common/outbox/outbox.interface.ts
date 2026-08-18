@@ -1,0 +1,45 @@
+import type { ClientSession } from 'mongoose';
+import type { OutboxStatus } from './outbox.constants';
+
+export type OutboxPayload = Readonly<Record<string, unknown>>;
+
+export type EnqueueOutboxEventInput = Readonly<{
+  eventType: string;
+  dedupeKey: string;
+  aggregateType: string;
+  aggregatePublicId: string;
+  payload: OutboxPayload;
+  correlationId?: string;
+  availableAt?: Date;
+  mongoSession: ClientSession;
+}>;
+
+export type ClaimedOutboxEvent = Readonly<{
+  publicId: string;
+  schemaVersion: number;
+  eventType: string;
+  dedupeKey: string;
+  aggregateType: string;
+  aggregatePublicId: string;
+  payload: OutboxPayload;
+  correlationId?: string;
+  attempt: number;
+  occurredAt: Date;
+}>;
+
+export interface OutboxEventHandler {
+  readonly eventType: string;
+  handle(event: ClaimedOutboxEvent): Promise<void>;
+}
+
+export type OutboxBacklogMetrics = Readonly<{
+  pending: number;
+  processing: number;
+  deadLetter: number;
+  oldestPendingAt: string | null;
+}>;
+
+export type StoredOutboxState = Readonly<{
+  status: OutboxStatus;
+  attempt: number;
+}>;

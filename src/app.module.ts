@@ -20,6 +20,7 @@ import { BlockModule } from './modules/relationshipModule/block.module';
 import { CronModule } from './modules/cron/cron.module';
 import { ReactionModule } from './modules/reactions/reaction.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { OutboxModule } from './common/outbox/outbox.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { AdminModule } from './modules/admin/admin.module';
       envFilePath: '.env',
     }),
     ScheduleModule.forRoot(),
+    OutboxModule,
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
