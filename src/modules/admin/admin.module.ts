@@ -4,6 +4,12 @@ import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
 import {
+  AuthSession,
+  AuthSessionSchema,
+} from '../auth/schemas/auth-session.schema';
+import { Report, ReportSchema } from '../reports/schemas/report.schema';
+import { User, UserSchema } from '../users/schemas/user.schema';
+import {
   ADMIN_POLICY,
   ADMIN_POLICY_PROVIDER,
 } from './config/admin-policy.config';
@@ -18,6 +24,9 @@ import { AdminAccountLifecycleController } from './controllers/admin-account-lif
 import { AdminAccountQueryController } from './controllers/admin-account-query.controller';
 import { AdminAccountStatusController } from './controllers/admin-account-status.controller';
 import { AdminAccountDeletionController } from './controllers/admin-account-deletion.controller';
+import { AdminUserQueryController } from './controllers/admin-user-query.controller';
+import { AdminUserRestrictionController } from './controllers/admin-user-restriction.controller';
+import { AdminUserDeletionController } from './controllers/admin-user-deletion.controller';
 import { AdminActivationController } from './controllers/admin-activation.controller';
 import { AdminAuthController } from './controllers/admin-auth.controller';
 import { AdminAuthOriginGuard } from './guards/admin-auth-origin.guard';
@@ -26,6 +35,8 @@ import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { AdminPermissionGuard } from './guards/admin-permission.guard';
 import { AdminAccountStatusPermissionGuard } from './guards/admin-account-status-permission.guard';
 import { AdminAccountDeletionPermissionGuard } from './guards/admin-account-deletion-permission.guard';
+import { AdminUserRestrictionPermissionGuard } from './guards/admin-user-restriction-permission.guard';
+import { AdminUserDeletionPermissionGuard } from './guards/admin-user-deletion-permission.guard';
 import {
   AdminAccount,
   AdminAccountSchema,
@@ -85,6 +96,18 @@ import {
 import { AdminAccountStatusService } from './services/admin-account-status.service';
 import { AdminAccountDeletionService } from './services/admin-account-deletion.service';
 import { AdminLastSuperAdminInvariantService } from './services/admin-last-super-admin-invariant.service';
+import { AdminUserQueryService } from './services/admin-user-query.service';
+import { AdminUserAccessLogger } from './services/admin-user-access-logger.service';
+import {
+  AdminUserRestrictionRequest,
+  AdminUserRestrictionRequestSchema,
+} from './schemas/admin-user-restriction-request.schema';
+import { AdminUserRestrictionService } from './services/admin-user-restriction.service';
+import {
+  AdminUserDeletionRequest,
+  AdminUserDeletionRequestSchema,
+} from './schemas/admin-user-deletion-request.schema';
+import { AdminUserDeletionService } from './services/admin-user-deletion.service';
 
 @Module({
   imports: [
@@ -92,6 +115,9 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
     PassportModule,
     JwtModule.register({}),
     MongooseModule.forFeature([
+      { name: User.name, schema: UserSchema },
+      { name: AuthSession.name, schema: AuthSessionSchema },
+      { name: Report.name, schema: ReportSchema },
       { name: AdminAccount.name, schema: AdminAccountSchema },
       { name: AdminAuditEvent.name, schema: AdminAuditEventSchema },
       { name: AdminSession.name, schema: AdminSessionSchema },
@@ -110,9 +136,18 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
         name: AdminLoginProtection.name,
         schema: AdminLoginProtectionSchema,
       },
+      {
+        name: AdminUserRestrictionRequest.name,
+        schema: AdminUserRestrictionRequestSchema,
+      },
+      {
+        name: AdminUserDeletionRequest.name,
+        schema: AdminUserDeletionRequestSchema,
+      },
     ]),
   ],
   controllers: [
+    AdminUserQueryController,
     AdminAuditController,
     AdminAuthController,
     AdminActivationController,
@@ -120,8 +155,12 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
     AdminAccountQueryController,
     AdminAccountStatusController,
     AdminAccountDeletionController,
+    AdminUserRestrictionController,
+    AdminUserDeletionController,
   ],
   providers: [
+    AdminUserQueryService,
+    AdminUserAccessLogger,
     ADMIN_POLICY_PROVIDER,
     AUTH_SECRET_MATERIAL_BOUNDARY_PROVIDER,
     ADMIN_SECRETS_PROVIDER,
@@ -135,6 +174,8 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
     AdminPermissionGuard,
     AdminAccountStatusPermissionGuard,
     AdminAccountDeletionPermissionGuard,
+    AdminUserRestrictionPermissionGuard,
+    AdminUserDeletionPermissionGuard,
     AdminLoginProtectionService,
     AdminMfaCryptoService,
     AdminMfaService,
@@ -156,6 +197,8 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
     AdminAccountStatusService,
     AdminAccountDeletionService,
     AdminLastSuperAdminInvariantService,
+    AdminUserRestrictionService,
+    AdminUserDeletionService,
     {
       provide: ADMIN_RECOVERY_SECRET_STORE,
       useClass: AdminRecoveryCommandSecretStore,
@@ -163,6 +206,7 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
   ],
   exports: [
     MongooseModule,
+    AdminUserQueryService,
     ADMIN_POLICY,
     ADMIN_SECRETS,
     AdminAuthorizationStateService,
@@ -184,6 +228,8 @@ import { AdminLastSuperAdminInvariantService } from './services/admin-last-super
     AdminAccountStatusService,
     AdminAccountDeletionService,
     AdminLastSuperAdminInvariantService,
+    AdminUserRestrictionService,
+    AdminUserDeletionService,
   ],
 })
 export class AdminModule {}

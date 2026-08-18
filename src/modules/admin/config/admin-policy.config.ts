@@ -44,6 +44,7 @@ export type AdminPolicy = Readonly<{
     systemIssueTargetReleaseSeconds: 259_200;
   }>;
   retention: Readonly<{
+    adminUserRestoreDays: 30;
     reportEvidenceGraceDays: 30;
     adminAuditDays: 365;
     safeModerationHistoryDays: 365;
@@ -229,6 +230,7 @@ export const createAdminPolicy = (source: ConfigReader): AdminPolicy => {
       systemIssueTargetReleaseSeconds: 259_200 as const,
     }),
     retention: freeze({
+      adminUserRestoreDays: 30 as const,
       reportEvidenceGraceDays: 30 as const,
       adminAuditDays: 365 as const,
       safeModerationHistoryDays: 365 as const,

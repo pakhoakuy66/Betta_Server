@@ -48,6 +48,7 @@ describe('admin policy configuration', () => {
       systemIssueTargetReleaseSeconds: 259_200,
     });
     expect(policy.retention).toEqual({
+      adminUserRestoreDays: 30,
       reportEvidenceGraceDays: 30,
       adminAuditDays: 365,
       safeModerationHistoryDays: 365,
