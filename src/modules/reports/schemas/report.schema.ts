@@ -126,6 +126,14 @@ export class Report extends Document {
 
 export const ReportSchema = SchemaFactory.createForClass(Report);
 
+export const ADMIN_USER_REPORT_COUNT_INDEX =
+  'admin_user_report_count_v1' as const;
+
+ReportSchema.index(
+  { targetType: 1, targetId: 1 },
+  { name: ADMIN_USER_REPORT_COUNT_INDEX },
+);
+
 ReportSchema.index({
   reporterId: 1,
   targetType: 1,
