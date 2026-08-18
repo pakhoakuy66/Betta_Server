@@ -16,6 +16,7 @@ import {
   AuthAuditReasonCode,
 } from '../../auth/interfaces/auth-audit.interface';
 import { DEFAULT_AVATAR_ID, DEFAULT_AVATAR_URL } from '../schemas/user.schema';
+import { UserDeletionOrigin } from '../constants/user-moderation.constants';
 import {
   CURRENT_USER_ID,
   createQuery,
@@ -468,6 +469,26 @@ describe('UsersService write flows', () => {
       );
       expect(auditInput.metadata).toEqual({ affectedSessionCount: 4 });
       expect(auditInput.mongoSession).toBe(transactionSession);
+
+      expect(models.user.updateOne).toHaveBeenCalledWith(
+        {
+          _id: CURRENT_USER_ID,
+          isDeleted: false,
+          status: 'active',
+        },
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            isDeleted: true,
+            deletionOrigin: UserDeletionOrigin.USER_SELF_DELETED,
+            restorableUntil: null,
+          }),
+          $inc: {
+            version: 1,
+            authzVersion: 1,
+          },
+        }),
+        { session: transactionSession },
+      );
     });
 
     it('maps an audit infrastructure failure to service unavailable', async () => {

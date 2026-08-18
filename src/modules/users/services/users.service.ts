@@ -51,6 +51,7 @@ import { EngagementEvent } from '../../recap/schemas/engagement-event.schema';
 import { WeeklyRecap } from '../../recap/schemas/recap.schema';
 import { StreakHistory } from '../../streak/schemas/streak.schema';
 import { ReportCooldown } from '../../reports/schemas/report-cooldown.schema';
+import { UserDeletionOrigin } from '../constants/user-moderation.constants';
 
 const DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES = 3;
 const TRANSIENT_TRANSACTION_ERROR_LABEL = 'TransientTransactionError';
@@ -906,6 +907,8 @@ export class UsersService {
             $set: {
               isDeleted: true,
               deletedAt: now,
+              deletionOrigin: UserDeletionOrigin.USER_SELF_DELETED,
+              restorableUntil: null,
               followersCount: 0,
               followingCount: 0,
               postsCount: 0,
@@ -913,6 +916,10 @@ export class UsersService {
               avatar: DEFAULT_AVATAR_URL,
               bio: '',
               link: '',
+            },
+            $inc: {
+              version: 1,
+              authzVersion: 1,
             },
             $unset: {
               forgotPasswordOtp: '',

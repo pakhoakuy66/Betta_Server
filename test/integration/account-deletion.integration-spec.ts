@@ -845,7 +845,8 @@ describe('Account deletion MongoDB integration', () => {
       .select(
         '+forgotPasswordOtp +forgotPasswordExpiry ' +
           '+forgotPasswordAttempts +failedLoginAttempts ' +
-          '+failedLoginWindowStartedAt +lockedUntil',
+          '+failedLoginWindowStartedAt +lockedUntil ' +
+          '+deletionOrigin +restorableUntil +version +authzVersion',
       )
       .lean()
       .exec();
@@ -860,6 +861,10 @@ describe('Account deletion MongoDB integration', () => {
         avatar: DEFAULT_AVATAR_URL,
         bio: '',
         link: '',
+        deletionOrigin: 'USER_SELF_DELETED',
+        restorableUntil: null,
+        version: 1,
+        authzVersion: 1,
       }),
     );
     expect(storedDeletedUser?.deletedAt).toBeInstanceOf(Date);

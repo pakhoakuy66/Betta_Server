@@ -1,5 +1,17 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import {
+  USER_MODERATION_MIGRATABLE_FIELDS,
+  USER_MODERATION_MIGRATION_VERSION,
+  USER_MODERATION_SCHEMA_VERSION,
+  USER_DELETION_ORIGIN_INDEX_NAME,
+  USER_RESTRICTION_INDEX_NAME,
+  USER_RESTRICTION_PUBLIC_REASON_PATTERN,
+  USER_RESTRICTION_SUPPORT_REFERENCE_PATTERN,
+  UserDeletionOrigin,
+  UserRestrictionType,
+  type UserModerationMigratableField,
+} from '../constants/user-moderation.constants';
 
 export const DEFAULT_AVATAR_ID = 'user_1_bibjpn';
 
@@ -27,6 +39,90 @@ export const USER_STATUS = {
 } as const;
 
 export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
+
+const isNonNegativeSafeInteger = (value: unknown): boolean =>
+  Number.isSafeInteger(value) && Number(value) >= 0;
+
+const isValidRestrictionExpiry = function (
+  this: UserRestriction,
+  value: Date | null | undefined,
+): boolean {
+  if (this.type === UserRestrictionType.INDEFINITE_BAN) {
+    return value == null;
+  }
+  return (
+    this.type === UserRestrictionType.TEMPORARY_SUSPENSION &&
+    value instanceof Date &&
+    !Number.isNaN(value.getTime()) &&
+    this.effectiveAt instanceof Date &&
+    value.getTime() > this.effectiveAt.getTime()
+  );
+};
+
+@Schema({ _id: false, strict: 'throw' })
+export class UserRestriction {
+  @Prop({
+    type: String,
+    enum: Object.values(UserRestrictionType),
+    required: true,
+  })
+  type!: UserRestrictionType;
+
+  @Prop({ type: Date, required: true })
+  effectiveAt!: Date;
+
+  @Prop({
+    type: Date,
+    default: null,
+    validate: {
+      validator: isValidRestrictionExpiry,
+      message: 'Restriction expiry does not match its type',
+    },
+  })
+  expiresAt!: Date | null;
+
+  @Prop({
+    type: String,
+    required: true,
+    match: USER_RESTRICTION_SUPPORT_REFERENCE_PATTERN,
+  })
+  supportReference!: string;
+
+  @Prop({
+    type: String,
+    required: true,
+    match: USER_RESTRICTION_PUBLIC_REASON_PATTERN,
+  })
+  publicReasonCode!: string;
+}
+
+const UserRestrictionSchema = SchemaFactory.createForClass(UserRestriction);
+
+@Schema({ _id: false, strict: 'throw' })
+export class UserModerationMigrationMarker {
+  @Prop({
+    type: Number,
+    required: true,
+    enum: [USER_MODERATION_MIGRATION_VERSION],
+    immutable: true,
+  })
+  version!: typeof USER_MODERATION_MIGRATION_VERSION;
+
+  @Prop({ type: Date, required: true, immutable: true })
+  migratedAt!: Date;
+
+  @Prop({
+    type: [String],
+    required: true,
+    enum: USER_MODERATION_MIGRATABLE_FIELDS,
+    immutable: true,
+  })
+  ownedFields!: UserModerationMigratableField[];
+}
+
+const UserModerationMigrationMarkerSchema = SchemaFactory.createForClass(
+  UserModerationMigrationMarker,
+);
 
 @Schema({ timestamps: true }) // Tự động thêm createdAt, updatedAt
 export class User extends Document {
@@ -96,6 +192,57 @@ export class User extends Document {
 
   @Prop({ type: Date })
   deletedAt?: Date;
+
+  @Prop({
+    type: String,
+    enum: Object.values(UserDeletionOrigin),
+    default: null,
+    select: false,
+  })
+  deletionOrigin!: UserDeletionOrigin | null;
+
+  @Prop({ type: Date, default: null, select: false })
+  restorableUntil!: Date | null;
+
+  @Prop({
+    type: UserRestrictionSchema,
+    default: null,
+    select: false,
+  })
+  restriction!: UserRestriction | null;
+
+  @Prop({
+    type: Number,
+    default: 0,
+    min: 0,
+    validate: { validator: isNonNegativeSafeInteger },
+    select: false,
+  })
+  version!: number;
+
+  @Prop({
+    type: Number,
+    default: 0,
+    min: 0,
+    validate: { validator: isNonNegativeSafeInteger },
+    select: false,
+  })
+  authzVersion!: number;
+
+  @Prop({
+    type: Number,
+    default: USER_MODERATION_SCHEMA_VERSION,
+    enum: [USER_MODERATION_SCHEMA_VERSION],
+    select: false,
+  })
+  moderationSchemaVersion!: typeof USER_MODERATION_SCHEMA_VERSION;
+
+  @Prop({
+    type: UserModerationMigrationMarkerSchema,
+    default: undefined,
+    select: false,
+  })
+  moderationMigration?: UserModerationMigrationMarker;
 
   @Prop({
     type: String,
@@ -178,9 +325,61 @@ export class User extends Document {
 
 export const UserSchema = SchemaFactory.createForClass(User);
 
+export const ADMIN_USER_GLOBAL_LIST_INDEX =
+  'admin_user_global_list_v1' as const;
+export const ADMIN_USER_FILTERED_LIST_INDEX =
+  'admin_user_filtered_list_v1' as const;
+export const ADMIN_USER_LOGIN_LOCK_LIST_INDEX =
+  'admin_user_login_lock_list_v1' as const;
+export const ADMIN_USER_RESTRICTION_LIST_INDEX =
+  'admin_user_restriction_list_v1' as const;
+export const ADMIN_USER_USERNAME_LIST_INDEX =
+  'admin_user_username_list_v1' as const;
+
+UserSchema.index(
+  { createdAt: -1, publicId: 1 },
+  { name: ADMIN_USER_GLOBAL_LIST_INDEX },
+);
+UserSchema.index(
+  { isDeleted: 1, status: 1, createdAt: -1, publicId: 1 },
+  { name: ADMIN_USER_FILTERED_LIST_INDEX },
+);
+UserSchema.index(
+  { lockedUntil: 1, createdAt: -1, publicId: 1 },
+  {
+    name: ADMIN_USER_LOGIN_LOCK_LIST_INDEX,
+    partialFilterExpression: { lockedUntil: { $type: 'date' } },
+  },
+);
+UserSchema.index(
+  { 'restriction.type': 1, createdAt: -1, publicId: 1 },
+  {
+    name: ADMIN_USER_RESTRICTION_LIST_INDEX,
+    partialFilterExpression: { 'restriction.type': { $type: 'string' } },
+  },
+);
+UserSchema.index(
+  { username: 1, publicId: 1 },
+  { name: ADMIN_USER_USERNAME_LIST_INDEX },
+);
+
 UserSchema.index({
   isDeleted: 1,
   status: 1,
   streakCount: 1,
   _id: 1,
 });
+UserSchema.index(
+  { 'restriction.type': 1, 'restriction.expiresAt': 1, _id: 1 },
+  {
+    name: USER_RESTRICTION_INDEX_NAME,
+    partialFilterExpression: { 'restriction.type': { $type: 'string' } },
+  },
+);
+UserSchema.index(
+  { deletionOrigin: 1, deletedAt: 1, _id: 1 },
+  {
+    name: USER_DELETION_ORIGIN_INDEX_NAME,
+    partialFilterExpression: { deletionOrigin: { $type: 'string' } },
+  },
+);
