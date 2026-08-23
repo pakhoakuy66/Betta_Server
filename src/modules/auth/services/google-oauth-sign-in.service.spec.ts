@@ -37,6 +37,7 @@ import type { IssuedGoogleOAuthSessionHandoff } from '../interfaces/google-oauth
 import { GoogleOAuthSessionHandoffService } from './google-oauth-session-handoff.service';
 import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
 import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 const NOW = new Date('2026-07-25T08:00:00.000Z');
 const GOOGLE_SUBJECT = 'google-subject-123';
@@ -58,6 +59,7 @@ type AuthenticatedUserRecord = {
   status?: typeof USER_STATUS.ACTIVE;
   notificationSettings?: NotificationSettings;
   authzVersion: number;
+  version: number;
   restriction?: UserRestriction | null;
 };
 
@@ -117,6 +119,7 @@ const createContext = () => {
     status: USER_STATUS.ACTIVE,
     notificationSettings: DEFAULT_NOTIFICATION_SETTINGS,
     authzVersion: 0,
+    version: 0,
     restriction: null,
   };
 
@@ -143,6 +146,10 @@ const createContext = () => {
     Promise.resolve(HANDOFF),
   );
 
+  const convergeForAuthentication = jest.fn<
+    AdminUserRestrictionExpiryService['convergeForAuthentication']
+  >(() => Promise.resolve(null));
+
   const transaction = jest.fn<Transaction>((work) => work(mongoSession));
 
   const service = new GoogleOAuthSignInService(
@@ -162,6 +169,9 @@ const createContext = () => {
     {
       issue: issueHandoff,
     } as unknown as GoogleOAuthSessionHandoffService,
+    {
+      convergeForAuthentication,
+    } as unknown as AdminUserRestrictionExpiryService,
   );
 
   const metadata: SessionRequestMetadata = {
@@ -186,6 +196,7 @@ const createContext = () => {
     resolveGoogleUserId,
     createSession,
     issueHandoff,
+    convergeForAuthentication,
   };
 };
 
@@ -234,11 +245,19 @@ describe('GoogleOAuthSignInService', () => {
       context.mongoSession,
     );
 
+    expect(context.convergeForAuthentication).toHaveBeenCalledWith(
+      context.user._id,
+      NOW,
+      context.mongoSession,
+    );
     expect(context.createSession).toHaveBeenCalledWith(
       context.user,
       context.metadata,
       context.mongoSession,
     );
+    expect(
+      context.convergeForAuthentication.mock.invocationCallOrder[0],
+    ).toBeLessThan(context.createSession.mock.invocationCallOrder[0]);
 
     expect(context.findOneAndUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -269,6 +288,38 @@ describe('GoogleOAuthSignInService', () => {
     expect(serialized).not.toContain(GOOGLE_SUBJECT);
     expect(serialized).not.toContain('failedLoginAttempts');
     expect(serialized).not.toContain('lockedUntil');
+  });
+
+  it('uses converged authz state before session and handoff issuance', async () => {
+    const context = createContext();
+    context.user.restriction = {
+      type: UserRestrictionType.TEMPORARY_SUSPENSION,
+      effectiveAt: new Date(NOW.getTime() - 60_000),
+      expiresAt: new Date(NOW.getTime() - 1),
+      supportReference: 'sup_12345678',
+      publicReasonCode: 'community_policy_review',
+    };
+    context.user.version = 8;
+    context.user.authzVersion = 10;
+    context.convergeForAuthentication.mockResolvedValueOnce({
+      userPublicId: context.user.publicId,
+      beforeVersion: 8,
+      afterVersion: 9,
+      authzVersion: 11,
+      revokedSessionCount: 1,
+    });
+
+    await context.signIn();
+
+    expect(context.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        restriction: null,
+        version: 9,
+        authzVersion: 11,
+      }),
+      context.metadata,
+      context.mongoSession,
+    );
   });
 
   it('propagates handoff issuance failure for transaction rollback', async () => {

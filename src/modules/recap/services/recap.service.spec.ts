@@ -331,6 +331,45 @@ describe('RecapService', () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain(USER_B_ID.toString());
+    expect(userModel.find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        isDeleted: false,
+        status: 'active',
+        $or: expect.any(Array),
+      }),
+    );
+  });
+
+  it('re-redacts recap identities that are no longer eligible at read time', async () => {
+    const { service, weeklyRecapModel, userModel } = createContext();
+    weeklyRecapModel.findOne.mockReturnValue(
+      createQuery({
+        _id: RECAP_ID,
+        userId: USER_A_ID,
+        year: 2026,
+        weekNumber: 30,
+        weekKey: '2026-07-20',
+        weekStart: WEEK_START,
+        weekEnd: WEEK_END,
+        timezone: RECAP_TIMEZONE,
+        isSeen: false,
+        stats: {
+          postsCount: 2,
+          heartsGave: 3,
+          heartsReceived: 4,
+          topGivers: [USER_B_ID],
+          topReceivers: [USER_B_ID],
+        },
+      }),
+    );
+    userModel.find.mockReturnValue(createQuery([]));
+
+    const result = await service.getLatestRecapForUser(USER_A_ID.toString());
+
+    expect(result.data?.stats.topGivers).toEqual([]);
+    expect(result.data?.stats.topReceivers).toEqual([]);
+    expect(result.data?.stats.postsCount).toBe(2);
+    expect(result.data?.stats.heartsReceived).toBe(4);
   });
 
   it('marks only the authenticated user recap as seen', async () => {

@@ -39,15 +39,25 @@ describe('UsersService read flows', () => {
       });
 
       const filter = models.user.find.mock.calls[0]?.[0] as {
+        $and: Array<Record<string, unknown>>;
+      };
+      const baseFilter = filter.$and[0] as {
         username: { $regex: string; $options: string };
         _id: { $nin: unknown[] };
       };
 
-      expect(filter.username).toStrictEqual({
+      expect(baseFilter.username).toStrictEqual({
         $regex: 'a\\+b',
         $options: 'i',
       });
-      expect(filter._id.$nin).toEqual([CURRENT_USER_ID, BLOCKED_USER_ID]);
+      expect(baseFilter._id.$nin).toEqual([CURRENT_USER_ID, BLOCKED_USER_ID]);
+      expect(filter.$and[1]).toEqual(
+        expect.objectContaining({
+          isDeleted: false,
+          status: 'active',
+          $or: expect.any(Array),
+        }),
+      );
       expect(userQuery.skip).toHaveBeenCalledWith(2);
       expect(userQuery.limit).toHaveBeenCalledWith(3);
       expect(result.pagination).toStrictEqual({

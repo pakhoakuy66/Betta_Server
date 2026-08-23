@@ -15,8 +15,11 @@ import {
   Notification,
   NotificationType,
   NOTIFICATION_TTL_MS,
+  type SystemModerationNotificationPayload,
 } from '../schemas/notifications.schema';
 import { User } from '../../users/schemas/user.schema';
+import { Post } from '../../posts/schemas/post.schema';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 import { NotificationsQueryDto } from '../dto/notifications-query.dto';
 import {
   generateNotificationPublicId,
@@ -69,6 +72,16 @@ type CreateRecapReadyNotificationsResult = {
   modified: number;
 };
 
+export type CreateSystemModerationNotificationInput = Readonly<{
+  recipientId: Types.ObjectId;
+  noticePublicId: string;
+  action: SystemModerationNotificationPayload['action'];
+  publicReasonCode: string;
+  effectiveAt: Date;
+  expiresAt: Date | null;
+  supportReference: string;
+}>;
+
 type NotificationActorResponse = {
   id: string;
   publicId: string;
@@ -85,6 +98,7 @@ type NotificationResponse = {
   otherCount: number;
   content: string;
   targetPublicId?: string;
+  moderation?: SystemModerationNotificationPayload;
   isRead: boolean;
   createdAt: Date;
 };
@@ -97,6 +111,7 @@ type NotificationLeanDocument = {
   otherCount: number;
   content: string;
   targetPublicId?: string;
+  moderation?: SystemModerationNotificationPayload;
   isRead: boolean;
   createdAt: Date;
 };
@@ -107,6 +122,11 @@ type ActorLeanDocument = {
   username: string;
   fullname: string;
   avatar: string;
+};
+
+type NotificationTargetPost = {
+  publicId: string;
+  authorId: Types.ObjectId;
 };
 
 type NotificationListFilter = {
@@ -123,6 +143,8 @@ export class NotificationsService {
     private readonly notificationModel: Model<Notification>,
     @InjectModel(User.name)
     private readonly userModel: Model<User>,
+    @InjectModel(Post.name)
+    private readonly postModel: Model<Post>,
   ) {}
 
   async getNotifications(userId: string, query: NotificationsQueryDto) {
@@ -130,6 +152,7 @@ export class NotificationsService {
     const page = query.page;
     const limit = query.limit;
     const skip = (page - 1) * limit;
+    const now = new Date();
 
     const filter: NotificationListFilter = {
       recipientId: userObjectId,
@@ -146,7 +169,7 @@ export class NotificationsService {
         .skip(skip)
         .limit(limit + 1)
         .select(
-          'publicId type actorIds actorCount otherCount content targetPublicId isRead createdAt',
+          'publicId type actorIds actorCount otherCount content targetPublicId moderation isRead createdAt',
         )
         .lean<NotificationLeanDocument[]>()
         .exec(),
@@ -161,12 +184,19 @@ export class NotificationsService {
 
     const hasMore = notifications.length > limit;
     const pageNotifications = notifications.slice(0, limit);
-    const actorMap = await this.getActorMap(pageNotifications);
+    const [actorMap, visiblePostPublicIds] = await Promise.all([
+      this.getActorMap(pageNotifications, now),
+      this.getVisiblePostPublicIds(pageNotifications, now),
+    ]);
 
     return {
       success: true,
       data: pageNotifications.map((notification) =>
-        this.toNotificationResponse(notification, actorMap),
+        this.toNotificationResponse(
+          notification,
+          actorMap,
+          visiblePostPublicIds,
+        ),
       ),
       pagination: {
         page,
@@ -381,11 +411,11 @@ export class NotificationsService {
       };
     }
 
+    const now = new Date();
     const allowedUsers = await this.userModel
       .find({
         _id: { $in: targets.map((target) => target.recipientId) },
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
         'notificationSettings.enabled': { $ne: false },
         'notificationSettings.recap': { $ne: false },
       })
@@ -410,7 +440,6 @@ export class NotificationsService {
       };
     }
 
-    const now = new Date();
     let created = 0;
     let matched = 0;
     let modified = 0;
@@ -473,6 +502,42 @@ export class NotificationsService {
       matched,
       modified,
     };
+  }
+
+  async createSystemModerationNotification(
+    input: CreateSystemModerationNotificationInput,
+  ): Promise<void> {
+    const dedupeKey = `system-moderation:${input.noticePublicId}`;
+    const now = new Date();
+    await this.notificationModel
+      .findOneAndUpdate(
+        { dedupeKey },
+        {
+          $setOnInsert: {
+            publicId: generateNotificationPublicId(),
+            recipientId: input.recipientId,
+            type: NotificationType.SYSTEM_MODERATION,
+            actorIds: [],
+            countedActorIds: [],
+            actorCount: 0,
+            otherCount: 0,
+            content: 'Trạng thái truy cập tài khoản của bạn đã được cập nhật',
+            dedupeKey,
+            moderation: {
+              noticePublicId: input.noticePublicId,
+              action: input.action,
+              publicReasonCode: input.publicReasonCode,
+              effectiveAt: input.effectiveAt,
+              expiresAt: input.expiresAt,
+              supportReference: input.supportReference,
+            },
+            isRead: false,
+            expiresAt: this.buildExpiryDate(now),
+          },
+        },
+        { upsert: true, returnDocument: 'after' },
+      )
+      .exec();
   }
 
   private async upsertFollowNotification({
@@ -585,7 +650,9 @@ export class NotificationsService {
           dedupeKey,
           createdAt: { $ifNull: ['$createdAt', now] },
           _currentActorIds: { $ifNull: ['$actorIds', []] },
-          _currentCountedActorIds: { $ifNull: ['$countedActorIds', []] },
+          _currentCountedActorIds: {
+            $ifNull: ['$countedActorIds', []],
+          },
         },
       },
       {
@@ -716,6 +783,7 @@ export class NotificationsService {
 
   private async getActorMap(
     notifications: NotificationLeanDocument[],
+    now: Date,
   ): Promise<Map<string, NotificationActorResponse>> {
     const actorIds = [
       ...new Set(
@@ -734,8 +802,7 @@ export class NotificationsService {
         _id: {
           $in: actorIds.map((id) => new Types.ObjectId(id)),
         },
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id publicId username fullname avatar')
       .lean<ActorLeanDocument[]>()
@@ -758,6 +825,7 @@ export class NotificationsService {
   private toNotificationResponse(
     notification: NotificationLeanDocument,
     actorMap: Map<string, NotificationActorResponse>,
+    visiblePostPublicIds: Set<string>,
   ): NotificationResponse {
     const actors = notification.actorIds
       .map((actorId) => actorMap.get(actorId.toString()))
@@ -770,7 +838,12 @@ export class NotificationsService {
       actorCount: notification.actorCount,
       otherCount: notification.otherCount,
       content: notification.content,
-      targetPublicId: notification.targetPublicId,
+      targetPublicId:
+        notification.targetPublicId &&
+        visiblePostPublicIds.has(notification.targetPublicId)
+          ? notification.targetPublicId
+          : undefined,
+      moderation: notification.moderation,
       isRead: notification.isRead,
       createdAt: notification.createdAt,
     };
@@ -799,17 +872,65 @@ export class NotificationsService {
 
     if (!settingField) return true;
 
+    const now = new Date();
     const user = await this.userModel
       .exists({
         _id: recipientId,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
         'notificationSettings.enabled': { $ne: false },
         [`notificationSettings.${settingField}`]: { $ne: false },
       })
       .exec();
 
     return Boolean(user);
+  }
+
+  private async getVisiblePostPublicIds(
+    notifications: NotificationLeanDocument[],
+    now: Date,
+  ): Promise<Set<string>> {
+    const publicIds = [
+      ...new Set(
+        notifications.flatMap((notification) =>
+          notification.type === NotificationType.REACTION &&
+          notification.targetPublicId
+            ? [notification.targetPublicId]
+            : [],
+        ),
+      ),
+    ];
+
+    if (publicIds.length === 0) return new Set();
+    const posts = await this.postModel
+      .find({
+        publicId: { $in: publicIds },
+        expireAt: { $gt: now },
+        isDeletedByAdmin: false,
+      })
+      .select('publicId authorId')
+      .lean<NotificationTargetPost[]>()
+      .exec();
+
+    const authorIds = [
+      ...new Set(posts.map((post) => post.authorId.toString())),
+    ];
+    const eligibleAuthors = await this.userModel
+      .find({
+        _id: { $in: authorIds.map((id) => new Types.ObjectId(id)) },
+        ...buildEligibleUserMatch(now),
+      })
+      .select('_id')
+      .lean<Array<{ _id: Types.ObjectId }>>()
+      .exec();
+    const eligibleAuthorIds = new Set(
+      eligibleAuthors.map((author) => author._id.toString()),
+    );
+
+    return new Set(
+      posts
+        .filter((post) => eligibleAuthorIds.has(post.authorId.toString()))
+        .map((post) => post.publicId),
+    );
   }
 
   private toObjectId(value: string): Types.ObjectId {

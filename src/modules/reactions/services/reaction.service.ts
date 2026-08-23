@@ -15,6 +15,7 @@ import { User } from '../../users/schemas/user.schema';
 import { Reaction, ReactionType } from '../schemas/reaction.schema';
 import { ReactPostDto } from '../dto/react-post.dto';
 import { isValidPostPublicId } from '../../posts/utils/generate-post-public-id';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 
 type ReactionPost = {
   _id: Types.ObjectId;
@@ -263,8 +264,7 @@ export class ReactionService {
       this.userModel
         .findOne({
           _id: currentObjectId,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id')
         .lean<ReactionUser>()
@@ -290,8 +290,7 @@ export class ReactionService {
       this.userModel
         .findOne({
           _id: post.authorId,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id')
         .lean<ReactionUser>()

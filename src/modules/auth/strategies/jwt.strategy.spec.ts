@@ -167,7 +167,7 @@ describe('JwtStrategy', () => {
     );
   });
 
-  it('returns the public restriction only after a valid access token', async () => {
+  it('does not disclose a restriction to an inactive session', async () => {
     const { strategy, userModel, authSessionService } = createContext();
     userModel.findOne.mockReturnValue(
       createQuery<JwtUserLookup>({
@@ -185,6 +185,30 @@ describe('JwtStrategy', () => {
       }),
     );
     authSessionService.isSessionActive.mockResolvedValue(false);
+
+    await expect(
+      strategy.validate({ ...validPayload, authzVersion: 1 }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('returns the public restriction only after a valid access token', async () => {
+    const { strategy, userModel, authSessionService } = createContext();
+    userModel.findOne.mockReturnValue(
+      createQuery<JwtUserLookup>({
+        _id: USER_ID,
+        email: 'database@example.com',
+        username: 'database_user',
+        authzVersion: 1,
+        restriction: {
+          type: UserRestrictionType.INDEFINITE_BAN,
+          effectiveAt: new Date('2026-08-17T00:00:00.000Z'),
+          expiresAt: null,
+          supportReference: 'sup_12345678',
+          publicReasonCode: 'policy_violation',
+        },
+      }),
+    );
+    authSessionService.isSessionActive.mockResolvedValue(true);
 
     await expect(
       strategy.validate({ ...validPayload, authzVersion: 1 }),

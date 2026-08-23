@@ -52,6 +52,10 @@ import { WeeklyRecap } from '../../recap/schemas/recap.schema';
 import { StreakHistory } from '../../streak/schemas/streak.schema';
 import { ReportCooldown } from '../../reports/schemas/report-cooldown.schema';
 import { UserDeletionOrigin } from '../constants/user-moderation.constants';
+import {
+  buildEligibleUserMatch,
+  withEligibleUserMatch,
+} from '../policies/user-eligibility.policy';
 
 const DELETE_ACCOUNT_TRANSACTION_MAX_RETRIES = 3;
 const TRANSIENT_TRANSACTION_ERROR_LABEL = 'TransientTransactionError';
@@ -281,6 +285,7 @@ export class UsersService {
   }
 
   async searchUsers(currentUserId: string, query: SearchUsersQueryDto) {
+    const now = new Date();
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
@@ -288,17 +293,18 @@ export class UsersService {
     const escapedKeyword = this.escapeRegExp(keyword);
     const hiddenUserIds = await this.getHiddenUserIdsForSearch(currentUserId);
 
-    const filter = {
-      isDeleted: false,
-      status: 'active',
-      username: {
-        $regex: escapedKeyword,
-        $options: 'i',
+    const filter = withEligibleUserMatch(
+      {
+        username: {
+          $regex: escapedKeyword,
+          $options: 'i',
+        },
+        _id: {
+          $nin: hiddenUserIds,
+        },
       },
-      _id: {
-        $nin: hiddenUserIds,
-      },
-    };
+      now,
+    );
 
     const users = await this.userModel
       .find(filter)
@@ -341,15 +347,19 @@ export class UsersService {
     }
 
     const currentObjectId = new Types.ObjectId(currentUserId);
+    const now = new Date();
     const limit = query.limit ?? 10;
     const excludePublicIds = query.excludePublicIds ?? [];
 
     const currentUser = await this.userModel
-      .findOne({
-        _id: currentObjectId,
-        isDeleted: false,
-        status: 'active',
-      })
+      .findOne(
+        withEligibleUserMatch(
+          {
+            _id: currentObjectId,
+          },
+          now,
+        ),
+      )
       .select('_id')
       .lean()
       .exec();
@@ -363,8 +373,7 @@ export class UsersService {
 
     const matchStage: PipelineStage.Match['$match'] = {
       _id: { $nin: excludedObjectIds },
-      isDeleted: false,
-      status: 'active',
+      ...buildEligibleUserMatch(now),
     };
 
     if (excludePublicIds.length > 0) {
@@ -416,12 +425,16 @@ export class UsersService {
     username: string,
     currentUserId?: string,
   ): Promise<{ success: boolean; data: UserProfileResponse }> {
+    const now = new Date();
     const user = await this.userModel
-      .findOne({
-        username,
-        isDeleted: false,
-        status: 'active',
-      })
+      .findOne(
+        withEligibleUserMatch(
+          {
+            username,
+          },
+          now,
+        ),
+      )
       .select(
         '_id publicId username fullname avatar avatarId bio link streakCount postsCount',
       )
@@ -470,8 +483,8 @@ export class UsersService {
     }
 
     const [realFollowersCount, realFollowingCount] = await Promise.all([
-      this.countActiveFollowers(user._id),
-      this.countActiveFollowing(user._id),
+      this.countEligibleFollowers(user._id, now),
+      this.countEligibleFollowing(user._id, now),
     ]);
 
     return {
@@ -1126,7 +1139,10 @@ export class UsersService {
     };
   }
 
-  private async countActiveFollowers(userId: Types.ObjectId): Promise<number> {
+  private async countEligibleFollowers(
+    userId: Types.ObjectId,
+    now: Date,
+  ): Promise<number> {
     const result = await this.relationshipModel.aggregate<CountResult>([
       { $match: { followingId: userId } },
       {
@@ -1138,14 +1154,17 @@ export class UsersService {
         },
       },
       { $unwind: '$follower' },
-      { $match: { 'follower.isDeleted': false } },
+      { $match: buildEligibleUserMatch(now, 'follower') },
       { $count: 'total' },
     ]);
 
     return result[0]?.total ?? 0;
   }
 
-  private async countActiveFollowing(userId: Types.ObjectId): Promise<number> {
+  private async countEligibleFollowing(
+    userId: Types.ObjectId,
+    now: Date,
+  ): Promise<number> {
     const result = await this.relationshipModel.aggregate<CountResult>([
       { $match: { followerId: userId } },
       {
@@ -1157,7 +1176,7 @@ export class UsersService {
         },
       },
       { $unwind: '$following' },
-      { $match: { 'following.isDeleted': false } },
+      { $match: buildEligibleUserMatch(now, 'following') },
       { $count: 'total' },
     ]);
 

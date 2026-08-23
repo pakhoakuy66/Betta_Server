@@ -9,6 +9,7 @@ import {
   WeeklyRecapJobService,
   type WeeklyRecapCatchUpResult,
 } from '../../recap/services/weekly-recap-job.service';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 const catchUpResult = (
   overrides: Partial<WeeklyRecapCatchUpResult> = {},
@@ -42,6 +43,14 @@ describe('TasksService weekly recap catch-up logging', () => {
       cleanupEligibleReactions: jest.fn(),
     };
 
+    const restrictionExpiryService = {
+      expireDueRestrictions: jest.fn<
+        AdminUserRestrictionExpiryService['expireDueRestrictions']
+      >(() =>
+        Promise.resolve({ scanned: 0, expired: 0, skipped: 0, failed: 0 }),
+      ),
+    };
+
     const configService = {
       get: jest.fn(),
     };
@@ -51,6 +60,7 @@ describe('TasksService weekly recap catch-up logging', () => {
       {} as StreakService,
       weeklyRecapJobService as unknown as WeeklyRecapJobService,
       reactionCleanupService as unknown as ReactionCleanupService,
+      restrictionExpiryService as unknown as AdminUserRestrictionExpiryService,
       configService as unknown as ConfigService,
     );
     const logger = (
@@ -67,11 +77,55 @@ describe('TasksService weekly recap catch-up logging', () => {
     jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     jest.spyOn(logger, 'error').mockImplementation(() => undefined);
 
-    return { service, weeklyRecapJobService, logger };
+    return { service, weeklyRecapJobService, restrictionExpiryService, logger };
   };
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('prevents local overlap while allowing the next expiry tick', async () => {
+    const { service, restrictionExpiryService } = createService();
+    let release: (() => void) | undefined;
+    restrictionExpiryService.expireDueRestrictions.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ scanned: 1, expired: 1, skipped: 0, failed: 0 });
+        }),
+    );
+
+    const first = service.handleRestrictionExpiry();
+    await Promise.resolve();
+    await service.handleRestrictionExpiry();
+
+    expect(
+      restrictionExpiryService.expireDueRestrictions,
+    ).toHaveBeenCalledTimes(1);
+
+    release?.();
+    await first;
+    await service.handleRestrictionExpiry();
+
+    expect(
+      restrictionExpiryService.expireDueRestrictions,
+    ).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs failed expiry batches without throwing from the scheduler', async () => {
+    const { service, restrictionExpiryService, logger } = createService();
+    restrictionExpiryService.expireDueRestrictions.mockResolvedValue({
+      scanned: 3,
+      expired: 1,
+      skipped: 1,
+      failed: 1,
+    });
+
+    await expect(service.handleRestrictionExpiry()).resolves.toBeUndefined();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('"failed":1'),
+    );
   });
 
   it('logs successful batches at info level', async () => {

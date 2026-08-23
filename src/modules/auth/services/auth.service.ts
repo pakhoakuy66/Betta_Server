@@ -43,8 +43,8 @@ import {
 import { normalizeAuthEmail } from '../../../common/utils/normalize-auth-email';
 import { toPublicAuthUser } from '../mappers/public-auth-user.mapper';
 import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
-import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 import { isActiveUserRestriction } from '../../users/utils/user-restriction';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -109,6 +109,8 @@ export class AuthService {
     private readonly authSessionService: AuthSessionService,
 
     private readonly authAuditService: AuthAuditService,
+
+    private readonly restrictionExpiryService: AdminUserRestrictionExpiryService,
   ) {}
 
   // ─────────────────────────────────────────────
@@ -169,13 +171,14 @@ export class AuthService {
 
   private ensureAccountCanUseAuth(
     user: Pick<User, 'isDeleted' | 'status' | 'restriction'>,
+    now = new Date(),
   ) {
     if (user.isDeleted) {
       throw new UnauthorizedException(
         'Tài khoản không tồn tại hoặc đã bị khóa',
       );
     }
-    if (isActiveUserRestriction(user.restriction)) {
+    if (isActiveUserRestriction(user.restriction, now)) {
       throw new AccountRestrictedException(user.restriction);
     }
     if (user.status === 'banned') {
@@ -469,7 +472,6 @@ export class AuthService {
   ): Promise<AuthResponse> {
     const email = normalizeAuthEmail(body.email);
     const password = body.password;
-    const now = new Date();
 
     const user = await this.userModel
       .findOne({
@@ -499,12 +501,17 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
-    if (this.isLoginLocked(user, now)) {
+    const credentialCheckedAt = new Date();
+
+    if (this.isLoginLocked(user, credentialCheckedAt)) {
       this.throwLoginLocked(user.lockedUntil);
     }
 
     if (!isPasswordValid) {
-      const lockedUntil = await this.recordFailedLoginAttempt(user._id, now);
+      const lockedUntil = await this.recordFailedLoginAttempt(
+        user._id,
+        credentialCheckedAt,
+      );
 
       if (lockedUntil) {
         this.throwLoginLocked(lockedUntil);
@@ -513,14 +520,17 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);
     }
 
-    this.ensureAccountCanUseAuth(user);
-
     /*
-     * Chỉ cấp phiên nếu tài khoản vẫn chưa bị khóa hoặc xóa trong thời gian
-     * bcrypt đang chạy. Đồng thời reset bộ đếm đăng nhập thất bại.
+     * Chỉ cấp phiên nếu credential và account state vẫn hợp lệ sau bcrypt.
+     * Không khóa theo authzVersion của snapshot ban đầu: expiry worker có thể
+     * tăng version hợp lệ trong lúc bcrypt chạy. Query này vẫn fail-closed cho
+     * password change, delete, ban và login lock; transaction write conflict
+     * bảo vệ thay đổi moderation xảy ra đồng thời.
      * Refresh-token hash được lưu riêng trong auth_sessions khi tạo session.
      */
     const loginResult = await this.connection.transaction(async (session) => {
+      const authenticationTime = new Date();
+
       /*
        * Khóa credential state đã được bcrypt xác minh.
        * Nếu password thay đổi trong lúc bcrypt chạy,
@@ -531,24 +541,11 @@ export class AuthService {
           {
             _id: user._id,
             password: user.password,
-            authzVersion: user.authzVersion,
             isDeleted: false,
             status: 'active',
-            $and: [
-              {
-                $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
-              },
-              {
-                $or: [
-                  { restriction: null },
-                  { restriction: { $exists: false } },
-                  {
-                    'restriction.type':
-                      UserRestrictionType.TEMPORARY_SUSPENSION,
-                    'restriction.expiresAt': { $lte: now },
-                  },
-                ],
-              },
+            $or: [
+              { lockedUntil: null },
+              { lockedUntil: { $lte: authenticationTime } },
             ],
           },
           {
@@ -573,6 +570,20 @@ export class AuthService {
         return null;
       }
 
+      this.ensureAccountCanUseAuth(authenticatedUser, authenticationTime);
+
+      const expiry =
+        await this.restrictionExpiryService.convergeForAuthentication(
+          authenticatedUser._id,
+          authenticationTime,
+          session,
+        );
+      if (expiry) {
+        authenticatedUser.restriction = null;
+        authenticatedUser.version = expiry.afterVersion;
+        authenticatedUser.authzVersion = expiry.authzVersion;
+      }
+
       /*
        * User CAS và auth_session insert cùng transaction.
        * Không còn khoảng trống để session dùng password cũ
@@ -593,17 +604,23 @@ export class AuthService {
     if (!loginResult) {
       const latestUser = await this.userModel
         .findById(user._id)
-        .select('+lockedUntil +restriction')
+        .select('+password +lockedUntil +restriction')
         .exec();
 
       const latestCheckTime = new Date();
 
-      if (latestUser && this.isLoginLocked(latestUser, latestCheckTime)) {
-        this.throwLoginLocked(latestUser.lockedUntil);
-      }
+      if (
+        latestUser &&
+        typeof latestUser.password === 'string' &&
+        latestUser.password === user.password
+      ) {
+        if (this.isLoginLocked(latestUser, latestCheckTime)) {
+          this.throwLoginLocked(latestUser.lockedUntil);
+        }
 
-      if (latestUser && isActiveUserRestriction(latestUser.restriction)) {
-        throw new AccountRestrictedException(latestUser.restriction);
+        if (isActiveUserRestriction(latestUser.restriction, latestCheckTime)) {
+          throw new AccountRestrictedException(latestUser.restriction);
+        }
       }
 
       throw new UnauthorizedException(INVALID_LOGIN_MESSAGE);

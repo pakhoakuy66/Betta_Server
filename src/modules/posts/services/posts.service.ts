@@ -25,6 +25,7 @@ import { Block } from '../../relationshipModule/schemas/block.schema';
 import { Reaction } from '../../reactions/schemas/reaction.schema';
 import { PostShare } from '../schemas/post-share.schema';
 import { FeedQueryDto, ProfilePostsQueryDto } from '../dto/post-query.dto';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 
 const POST_SHARE_WINDOW_MS = 10 * 60 * 1000;
 
@@ -115,6 +116,7 @@ export class PostsService {
     }
 
     const userObjectId = new Types.ObjectId(authorId);
+    const now = new Date();
     const normalizedContent = dto.content?.trim() ?? '';
     const normalizedIdempotencyKey =
       this.normalizeIdempotencyKey(idempotencyKey);
@@ -131,8 +133,7 @@ export class PostsService {
     const author = await this.userModel
       .findOne({
         _id: userObjectId,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean()
@@ -243,12 +244,12 @@ export class PostsService {
     }
 
     const currentObjectId = new Types.ObjectId(currentUserId);
+    const now = new Date();
 
     const currentUser = await this.userModel
       .findOne({
         _id: currentObjectId,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean()
@@ -299,6 +300,7 @@ export class PostsService {
     }
 
     const userObjectId = new Types.ObjectId(currentUserId);
+    const now = new Date();
     const page = query.page;
     const limit = query.limit;
     const skip = (page - 1) * limit;
@@ -306,8 +308,7 @@ export class PostsService {
     const currentUser = await this.userModel
       .findOne({
         _id: userObjectId,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean()
@@ -352,8 +353,7 @@ export class PostsService {
     const activeAuthors = await this.userModel
       .find({
         _id: { $in: candidateAuthorIds },
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id publicId username fullname avatar streakCount')
       .lean()
@@ -377,7 +377,7 @@ export class PostsService {
     const posts = await this.postModel
       .find({
         authorId: { $in: activeAuthorIds },
-        expireAt: { $gt: new Date() },
+        expireAt: { $gt: now },
         isDeletedByAdmin: false,
       })
       .sort({ createdAt: -1 })
@@ -432,8 +432,7 @@ export class PostsService {
       this.userModel
         .findOne({
           _id: currentObjectId,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id')
         .lean()
@@ -442,8 +441,7 @@ export class PostsService {
       this.userModel
         .findOne({
           username: normalizedUsername,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id publicId username fullname avatar streakCount')
         .lean()
@@ -549,13 +547,13 @@ export class PostsService {
     }
 
     const currentObjectId = new Types.ObjectId(currentUserId);
+    const now = new Date();
 
     const [currentUser, post] = await Promise.all([
       this.userModel
         .findOne({
           _id: currentObjectId,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id')
         .lean()
@@ -564,7 +562,7 @@ export class PostsService {
       this.postModel
         .findOne({
           publicId,
-          expireAt: { $gt: new Date() },
+          expireAt: { $gt: now },
           isDeletedByAdmin: false,
         })
         .exec(),
@@ -584,8 +582,7 @@ export class PostsService {
       this.userModel
         .findOne({
           _id: post.authorId,
-          isDeleted: false,
-          status: 'active',
+          ...buildEligibleUserMatch(now),
         })
         .select('_id publicId username fullname avatar streakCount')
         .lean()
@@ -823,10 +820,11 @@ export class PostsService {
     }
 
     const currentObjectId = new Types.ObjectId(currentUserId);
+    const now = new Date();
 
     const [currentUser, post] = await Promise.all([
       this.userModel
-        .findOne({ _id: currentObjectId, isDeleted: false, status: 'active' })
+        .findOne({ _id: currentObjectId, ...buildEligibleUserMatch(now) })
         .select('_id')
         .lean()
         .exec(),
@@ -834,7 +832,7 @@ export class PostsService {
       this.postModel
         .findOne({
           publicId,
-          expireAt: { $gt: new Date() },
+          expireAt: { $gt: now },
           isDeletedByAdmin: false,
         })
         .exec(),
@@ -852,7 +850,7 @@ export class PostsService {
 
     const [author, blockRecord] = await Promise.all([
       this.userModel
-        .findOne({ _id: post.authorId, isDeleted: false, status: 'active' })
+        .findOne({ _id: post.authorId, ...buildEligibleUserMatch(now) })
         .select('_id')
         .lean()
         .exec(),

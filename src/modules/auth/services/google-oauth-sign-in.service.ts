@@ -25,6 +25,7 @@ import { AccountRestrictedException } from '../exceptions/account-restricted.exc
 import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 import { isActiveUserRestriction } from '../../users/utils/user-restriction';
 import type { UserRestriction } from '../../users/schemas/user.schema';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 const ACCOUNT_UNAVAILABLE_MESSAGE = 'Tài khoản không tồn tại hoặc đã bị khóa';
 
@@ -44,6 +45,7 @@ const AUTHENTICATED_USER_SELECTION = [
   'status',
   'notificationSettings',
   '+authzVersion',
+  '+version',
   '+restriction',
 ].join(' ');
 
@@ -60,6 +62,7 @@ type AuthenticatedGoogleUser = {
   status?: typeof USER_STATUS.ACTIVE;
   notificationSettings?: User['notificationSettings'];
   authzVersion: number;
+  version: number;
   restriction: UserRestriction | null;
 };
 
@@ -96,6 +99,8 @@ export class GoogleOAuthSignInService {
     private readonly authSessionService: AuthSessionService,
 
     private readonly sessionHandoffService: GoogleOAuthSessionHandoffService,
+
+    private readonly restrictionExpiryService: AdminUserRestrictionExpiryService,
   ) {}
 
   async signInLinkedAccount(
@@ -171,6 +176,18 @@ export class GoogleOAuthSignInService {
             return {
               outcome: 'ACCOUNT_REJECTED',
             };
+          }
+
+          const expiry =
+            await this.restrictionExpiryService.convergeForAuthentication(
+              user._id,
+              now,
+              mongoSession,
+            );
+          if (expiry) {
+            user.restriction = null;
+            user.version = expiry.afterVersion;
+            user.authzVersion = expiry.authzVersion;
           }
 
           const tokens = await this.authSessionService.createSession(

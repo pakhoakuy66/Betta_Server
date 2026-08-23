@@ -136,11 +136,14 @@ describe('BlockService', () => {
         service.blockUser(CURRENT_USER_ID.toString(), 'usr_tXdqiPs9aK'),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      expect(userModel.findOne).toHaveBeenCalledWith({
-        publicId: 'usr_tXdqiPs9aK',
-        isDeleted: false,
-        status: 'active',
-      });
+      expect(userModel.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          publicId: 'usr_tXdqiPs9aK',
+          isDeleted: false,
+          status: 'active',
+          $or: expect.any(Array),
+        }),
+      );
       expect(connection.startSession).not.toHaveBeenCalled();
     });
 
@@ -534,6 +537,8 @@ describe('BlockService', () => {
             avatar: 'https://example.com/avatar.jpg',
             streakCount: 3,
             isDeleted: false,
+            status: 'active',
+            restriction: null,
           },
         },
         {
@@ -560,7 +565,7 @@ describe('BlockService', () => {
 
       expect(query.populate).toHaveBeenCalledWith(
         'blockedId',
-        'publicId username fullname avatar streakCount isDeleted',
+        'publicId username fullname avatar streakCount isDeleted status +restriction',
       );
 
       expect(result).toStrictEqual({

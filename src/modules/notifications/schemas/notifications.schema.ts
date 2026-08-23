@@ -4,6 +4,12 @@ import {
   generateNotificationPublicId,
   isValidNotificationPublicId,
 } from '../utils/notification-public-id';
+import { UserModerationNoticeAction } from '../../users/constants/user-moderation-notice.constants';
+import { USER_MODERATION_NOTICE_PUBLIC_ID_PATTERN } from '../../users/constants/user-moderation-notice.constants';
+import {
+  USER_RESTRICTION_PUBLIC_REASON_PATTERN,
+  USER_RESTRICTION_SUPPORT_REFERENCE_PATTERN,
+} from '../../users/constants/user-moderation.constants';
 
 export const NOTIFICATION_TTL_DAYS = 14;
 export const NOTIFICATION_TTL_MS = NOTIFICATION_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -13,7 +19,49 @@ export enum NotificationType {
   RECAP = 'RECAP',
   EXPIRING = 'EXPIRING',
   FOLLOW = 'FOLLOW',
+  SYSTEM_MODERATION = 'SYSTEM_MODERATION',
 }
+
+@Schema({ _id: false, strict: 'throw' })
+export class SystemModerationNotificationPayload {
+  @Prop({
+    type: String,
+    required: true,
+    match: USER_MODERATION_NOTICE_PUBLIC_ID_PATTERN,
+  })
+  noticePublicId!: string;
+
+  @Prop({
+    type: String,
+    required: true,
+    enum: Object.values(UserModerationNoticeAction),
+  })
+  action!: UserModerationNoticeAction;
+
+  @Prop({
+    type: String,
+    required: true,
+    match: USER_RESTRICTION_PUBLIC_REASON_PATTERN,
+  })
+  publicReasonCode!: string;
+
+  @Prop({ type: Date, required: true })
+  effectiveAt!: Date;
+
+  @Prop({ type: Date, default: null })
+  expiresAt!: Date | null;
+
+  @Prop({
+    type: String,
+    required: true,
+    match: USER_RESTRICTION_SUPPORT_REFERENCE_PATTERN,
+  })
+  supportReference!: string;
+}
+
+const SystemModerationNotificationPayloadSchema = SchemaFactory.createForClass(
+  SystemModerationNotificationPayload,
+);
 
 @Schema({
   timestamps: true,
@@ -72,6 +120,12 @@ export class Notification extends Document {
   @Prop({ type: String })
   dedupeKey?: string;
 
+  @Prop({
+    type: SystemModerationNotificationPayloadSchema,
+    default: undefined,
+  })
+  moderation?: SystemModerationNotificationPayload;
+
   @Prop({ type: Boolean, default: false, index: true })
   isRead!: boolean;
 
@@ -81,6 +135,9 @@ export class Notification extends Document {
     index: { expires: 0 },
   })
   expiresAt!: Date;
+
+  createdAt!: Date;
+  updatedAt!: Date;
 }
 
 export const NotificationSchema = SchemaFactory.createForClass(Notification);
@@ -95,6 +152,19 @@ NotificationSchema.index(
     sparse: true,
   },
 );
+
+NotificationSchema.pre('validate', function validateModerationContract() {
+  const isSystemModeration = this.type === NotificationType.SYSTEM_MODERATION;
+  if (isSystemModeration !== Boolean(this.moderation)) {
+    throw new Error('SYSTEM_MODERATION payload không hợp lệ');
+  }
+  if (
+    isSystemModeration &&
+    (this.actorIds.length !== 0 || this.countedActorIds.length !== 0)
+  ) {
+    throw new Error('SYSTEM_MODERATION không được chứa actor');
+  }
+});
 
 NotificationSchema.index(
   { publicId: 1 },

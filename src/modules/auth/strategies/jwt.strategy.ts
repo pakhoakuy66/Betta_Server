@@ -98,12 +98,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw error;
     }
 
-    if (user && isActiveUserRestriction(user.restriction)) {
-      throw new AccountRestrictedException(user.restriction);
-    }
-
     if (!user || !sessionActive || user.authzVersion !== payload.authzVersion) {
       throw new UnauthorizedException('Phiên đăng nhập không còn hợp lệ');
+    }
+
+    if (isActiveUserRestriction(user.restriction)) {
+      throw new AccountRestrictedException(user.restriction);
     }
 
     const id = user._id.toString();

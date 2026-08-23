@@ -1,13 +1,17 @@
 import { customAlphabet } from 'nanoid';
 
-const USER_PUBLIC_ID_PREFIX = 'usr_';
-const USER_PUBLIC_ID_LENGTH = 10;
+export const USER_PUBLIC_ID_PREFIX = 'usr_';
+export const USER_PUBLIC_ID_LENGTH = 10;
 
-const PUBLIC_ID_ALPHABET =
+export const USER_PUBLIC_ID_ALPHABET =
   '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
+export const USER_PUBLIC_ID_PATTERN = new RegExp(
+  `^${USER_PUBLIC_ID_PREFIX}[${USER_PUBLIC_ID_ALPHABET}]{${USER_PUBLIC_ID_LENGTH}}$`,
+);
+
 const generateNanoId = customAlphabet(
-  PUBLIC_ID_ALPHABET,
+  USER_PUBLIC_ID_ALPHABET,
   USER_PUBLIC_ID_LENGTH,
 );
 

@@ -60,9 +60,11 @@ import { GoogleOAuthCallbackController } from './controllers/google-oauth-callba
 import { GoogleOAuthSessionController } from './controllers/google-oauth-session.controller';
 import { GoogleOAuthFrontendRedirectService } from './services/google-oauth-frontend-redirect.service';
 import { GoogleOAuthAccountController } from './controllers/google-oauth-account.controller';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
   imports: [
+    AdminModule,
     // BỔ SUNG DÒNG NÀY: Đăng ký Model User cho riêng AuthModule sử dụng
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },

@@ -22,7 +22,7 @@ export class OutboxProcessorService {
 
   @Interval(5_000)
   async scheduledDrain(): Promise<void> {
-    if (this.config.get<string>('OUTBOX_PROCESSOR_ENABLED') === 'false') return;
+    if (this.config.get<string>('OUTBOX_PROCESSOR_ENABLED') !== 'true') return;
     await this.drain();
   }
 

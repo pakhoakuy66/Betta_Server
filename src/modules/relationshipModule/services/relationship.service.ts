@@ -12,6 +12,7 @@ import { NotificationsService } from '../../notifications/services/notifications
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
 import { Block } from '../schemas/block.schema';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 
 const USER_PUBLIC_ID_REGEX = /^usr_[A-Za-z0-9_-]{6,40}$/;
 
@@ -90,12 +91,12 @@ export class RelationshipService {
 
   private async resolveActiveUserObjectId(
     identifier: string,
+    now = new Date(),
   ): Promise<Types.ObjectId> {
     const user = await this.userModel
       .findOne({
         ...this.buildUserLookupFilter(identifier),
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean()
@@ -164,12 +165,12 @@ export class RelationshipService {
   async followUser(currentUserId: string, targetUserId: string) {
     const followerId = this.toCurrentUserObjectId(currentUserId);
     const targetFilter = this.buildUserLookupFilter(targetUserId);
+    const now = new Date();
 
     const target = await this.userModel
       .findOne({
         ...targetFilter,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean()
@@ -199,8 +200,7 @@ export class RelationshipService {
         const currentUserExists = await this.userModel
           .exists({
             _id: followerId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           })
           .session(session);
 
@@ -213,8 +213,7 @@ export class RelationshipService {
         const targetExists = await this.userModel
           .exists({
             _id: targetId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           })
           .session(session);
 
@@ -254,8 +253,7 @@ export class RelationshipService {
         const followerUpdate = await this.userModel.updateOne(
           {
             _id: followerId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           },
           { $inc: { followingCount: 1 } },
           { session },
@@ -270,8 +268,7 @@ export class RelationshipService {
         const targetUpdate = await this.userModel.updateOne(
           {
             _id: targetId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           },
           { $inc: { followersCount: 1 } },
           { session },
@@ -314,6 +311,7 @@ export class RelationshipService {
   async unfollowUser(currentUserId: string, targetUserId: string) {
     const followerId = this.toCurrentUserObjectId(currentUserId);
     const targetFilter = this.buildUserLookupFilter(targetUserId);
+    const now = new Date();
 
     const target = await this.userModel
       .findOne({
@@ -343,8 +341,7 @@ export class RelationshipService {
         const currentUserExists = await this.userModel
           .exists({
             _id: followerId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           })
           .session(session);
 
@@ -389,7 +386,8 @@ export class RelationshipService {
     limit: number = 20,
   ) {
     const skip = (page - 1) * limit;
-    const targetUserId = await this.resolveActiveUserObjectId(userId);
+    const now = new Date();
+    const targetUserId = await this.resolveActiveUserObjectId(userId, now);
     const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
     const activeFollowerStages = [
@@ -403,7 +401,7 @@ export class RelationshipService {
         },
       },
       { $unwind: '$followerUser' },
-      { $match: { 'followerUser.isDeleted': false } },
+      { $match: buildEligibleUserMatch(now, 'followerUser') },
       ...(hiddenUserIds.length > 0
         ? [{ $match: { 'followerUser._id': { $nin: hiddenUserIds } } }]
         : []),
@@ -486,7 +484,8 @@ export class RelationshipService {
     limit: number = 20,
   ) {
     const skip = (page - 1) * limit;
-    const targetUserId = await this.resolveActiveUserObjectId(userId);
+    const now = new Date();
+    const targetUserId = await this.resolveActiveUserObjectId(userId, now);
     const hiddenUserIds = await this.getBlockedUserIds(currentUserId);
 
     const activeFollowingStages = [
@@ -500,7 +499,7 @@ export class RelationshipService {
         },
       },
       { $unwind: '$followingUser' },
-      { $match: { 'followingUser.isDeleted': false } },
+      { $match: buildEligibleUserMatch(now, 'followingUser') },
       ...(hiddenUserIds.length > 0
         ? [{ $match: { 'followingUser._id': { $nin: hiddenUserIds } } }]
         : []),

@@ -140,11 +140,12 @@ describe('StreakService', () => {
       },
     );
     expect(userModel.findOneAndUpdate).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         _id: USER_ID,
         isDeleted: false,
         status: 'active',
-      },
+        $or: expect.any(Array),
+      }),
       {
         $inc: {
           streakCount: 1,
@@ -205,6 +206,17 @@ describe('StreakService', () => {
       skipped: 0,
       failed: 0,
     });
+
+    const decayCandidateFilter = userModel.find.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(decayCandidateFilter).not.toHaveProperty('restriction');
+    expect(decayCandidateFilter).not.toHaveProperty('$or');
+    expect(userModel.findOne.mock.calls[0]?.[0]).not.toHaveProperty(
+      'restriction',
+    );
+    expect(userModel.findOne.mock.calls[0]?.[0]).not.toHaveProperty('$or');
 
     expect(historyModel.create).toHaveBeenCalledWith(
       [

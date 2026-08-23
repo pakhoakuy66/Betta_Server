@@ -9,6 +9,11 @@ import { acquireSocialGraphPairLock } from '../utils/social-graph-lock.util';
 import { Block } from '../schemas/block.schema';
 import { Relationship } from '../schemas/relationship.schema';
 import { User } from '../../users/schemas/user.schema';
+import {
+  buildEligibleUserMatch,
+  isUserEligible,
+  type UserEligibilitySnapshot,
+} from '../../users/policies/user-eligibility.policy';
 
 type MongoDuplicateKeyError = {
   code?: number;
@@ -22,6 +27,8 @@ type PopulatedBlockedUser = {
   avatar?: string;
   streakCount?: number;
   isDeleted?: boolean;
+  status?: string;
+  restriction?: UserEligibilitySnapshot['restriction'];
 };
 
 const USER_PUBLIC_ID_REGEX = /^usr_[A-Za-z0-9_-]{6,40}$/;
@@ -103,13 +110,29 @@ export class BlockService {
 
   private async resolveActiveUserObjectId(
     identifier: string,
+    now = new Date(),
   ): Promise<Types.ObjectId> {
     const user = await this.userModel
       .findOne({
         ...this.buildUserLookupFilter(identifier),
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
+      .select('_id')
+      .lean()
+      .exec();
+
+    if (!user) {
+      throw new BadRequestException('Người dùng không tồn tại hoặc đã bị khóa');
+    }
+
+    return user._id;
+  }
+
+  private async resolveExistingUserObjectId(
+    identifier: string,
+  ): Promise<Types.ObjectId> {
+    const user = await this.userModel
+      .findOne(this.buildUserLookupFilter(identifier))
       .select('_id')
       .lean()
       .exec();
@@ -134,7 +157,8 @@ export class BlockService {
       currentUserId,
       'ID người dùng hiện tại không hợp lệ',
     );
-    const blockedId = await this.resolveActiveUserObjectId(targetUserId);
+    const now = new Date();
+    const blockedId = await this.resolveActiveUserObjectId(targetUserId, now);
 
     if (blockedId.equals(blockerId)) {
       throw new BadRequestException('Bạn không thể tự chặn chính mình');
@@ -154,8 +178,7 @@ export class BlockService {
         const blockerExists = await this.userModel
           .exists({
             _id: blockerId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           })
           .session(session);
 
@@ -168,8 +191,7 @@ export class BlockService {
         const blockedUserExists = await this.userModel
           .exists({
             _id: blockedId,
-            isDeleted: false,
-            status: 'active',
+            ...buildEligibleUserMatch(now),
           })
           .session(session);
 
@@ -241,7 +263,8 @@ export class BlockService {
       currentUserId,
       'ID người dùng hiện tại không hợp lệ',
     );
-    const blockedId = await this.resolveActiveUserObjectId(targetUserId);
+    // Cleanup remains possible even if the target later becomes ineligible.
+    const blockedId = await this.resolveExistingUserObjectId(targetUserId);
 
     const deleted = await this.blockModel.findOneAndDelete({
       blockerId,
@@ -257,12 +280,13 @@ export class BlockService {
 
   async getBlockedUsers(userId: string) {
     const blockerId = this.toObjectId(userId, 'ID người dùng không hợp lệ');
+    const now = new Date();
 
     const blocks = await this.blockModel
       .find({ blockerId })
       .populate(
         'blockedId',
-        'publicId username fullname avatar streakCount isDeleted',
+        'publicId username fullname avatar streakCount isDeleted status +restriction',
       )
       .lean()
       .exec();
@@ -271,7 +295,8 @@ export class BlockService {
       .map((block) => {
         const user = block.blockedId as unknown as PopulatedBlockedUser | null;
 
-        if (!user || user.isDeleted) return null;
+        if (!user) return null;
+        if (!isUserEligible(user, now)) return null;
 
         return {
           id: user.publicId,

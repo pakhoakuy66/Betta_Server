@@ -32,6 +32,7 @@ import {
 import { AuthAuditService } from '../../src/modules/auth/services/auth-audit.service';
 import { AuthSessionService } from '../../src/modules/auth/services/auth-session.service';
 import { GoogleOAuthSignInService } from '../../src/modules/auth/services/google-oauth-sign-in.service';
+import { AdminUserRestrictionExpiryService } from '../../src/modules/admin/services/admin-user-restriction-expiry.service';
 import { OAuthIdentityService } from '../../src/modules/auth/services/oauth-identity.service';
 import {
   USER_STATUS,
@@ -200,6 +201,9 @@ describe('Google OAuth linked-account sign-in MongoDB integration', () => {
       identityService,
       authSessionService,
       handoffService,
+      {
+        convergeForAuthentication: () => Promise.resolve(null),
+      } as unknown as AdminUserRestrictionExpiryService,
     );
   });
 

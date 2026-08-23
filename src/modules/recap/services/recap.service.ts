@@ -13,6 +13,7 @@ import {
   getRecapWeekRange,
   RECAP_TIMEZONE,
 } from '../utils/recap-week.util';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 
 const TOP_INTERACTION_LIMIT = 5;
 const TOP_INTERACTION_CANDIDATE_LIMIT = 20;
@@ -224,6 +225,7 @@ export class RecapService {
     referenceDate,
     weekStart,
   }: AggregateWeeklyRecapOptions = {}): Promise<AggregateWeeklyRecapResult> {
+    const eligibilityAt = new Date();
     const range = weekStart
       ? {
           weekStart,
@@ -249,7 +251,10 @@ export class RecapService {
       topReceiversMap,
     ]);
 
-    const activeUserIds = await this.filterActiveUserIds(activityUserIds);
+    const activeUserIds = await this.filterEligibleUserIds(
+      activityUserIds,
+      eligibilityAt,
+    );
     const activeUserIdSet = new Set(activeUserIds);
 
     if (activeUserIds.length === 0) {
@@ -327,6 +332,7 @@ export class RecapService {
 
   async getLatestRecapForUser(userId: string) {
     const userObjectId = new Types.ObjectId(userId);
+    const now = new Date();
 
     const recap = await this.weeklyRecapModel
       .findOne({
@@ -344,10 +350,10 @@ export class RecapService {
       };
     }
 
-    const usersById = await this.getRecapUsersById([
-      ...recap.stats.topGivers,
-      ...recap.stats.topReceivers,
-    ]);
+    const usersById = await this.getRecapUsersById(
+      [...recap.stats.topGivers, ...recap.stats.topReceivers],
+      now,
+    );
 
     return {
       success: true,
@@ -406,6 +412,7 @@ export class RecapService {
   async getWeeklyRecapNotificationTargets(
     weekKey: string,
   ): Promise<WeeklyRecapNotificationTarget[]> {
+    const now = new Date();
     const recaps = await this.weeklyRecapModel
       .find({
         weekKey,
@@ -427,8 +434,9 @@ export class RecapService {
     if (recaps.length === 0) return [];
 
     const activeUserIds = new Set(
-      await this.filterActiveUserIds(
+      await this.filterEligibleUserIds(
         recaps.map((recap) => recap.userId.toString()),
+        now,
       ),
     );
 
@@ -629,14 +637,16 @@ export class RecapService {
     return [...userIds];
   }
 
-  private async filterActiveUserIds(userIds: string[]): Promise<string[]> {
+  private async filterEligibleUserIds(
+    userIds: string[],
+    now: Date,
+  ): Promise<string[]> {
     if (userIds.length === 0) return [];
 
     const users = await this.userModel
       .find({
         _id: { $in: userIds.map((id) => new Types.ObjectId(id)) },
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('_id')
       .lean<{ _id: Types.ObjectId }[]>()
@@ -716,6 +726,7 @@ export class RecapService {
 
   private async getRecapUsersById(
     userIds: Types.ObjectId[],
+    now: Date,
   ): Promise<Map<string, RecapUserSummary>> {
     const uniqueUserIds = [
       ...new Set(userIds.map((userId) => userId.toString())),
@@ -728,8 +739,7 @@ export class RecapService {
     const users = await this.userModel
       .find({
         _id: { $in: uniqueUserIds.map((id) => new Types.ObjectId(id)) },
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('publicId username fullname avatar streakCount')
       .lean<RecapUserLean[]>()

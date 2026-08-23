@@ -39,8 +39,10 @@ import {
 } from '../../src/modules/auth/schemas/auth-audit-event.schema';
 import { AuthAuditService } from '../../src/modules/auth/services/auth-audit.service';
 import { AuthService } from '../../src/modules/auth/services/auth.service';
+import { AdminUserRestrictionExpiryService } from '../../src/modules/admin/services/admin-user-restriction-expiry.service';
 import { MailService } from '../../src/modules/auth/services/mail.service';
 import { User, UserSchema } from '../../src/modules/users/schemas/user.schema';
+import { UserRestrictionType } from '../../src/modules/users/constants/user-moderation.constants';
 import { JwtStrategy } from '../../src/modules/auth/strategies/jwt.strategy';
 
 const MONGODB_URI_ENV = 'MONGODB_INTEGRATION_URI';
@@ -274,6 +276,9 @@ describe('Auth runtime MongoDB integration', () => {
       mailService as unknown as MailService,
       authSessionService,
       authAuditService,
+      {
+        convergeForAuthentication: () => Promise.resolve(null),
+      } as unknown as AdminUserRestrictionExpiryService,
     );
 
     jwtStrategy = new JwtStrategy(configService, userModel, authSessionService);
@@ -356,6 +361,52 @@ describe('Auth runtime MongoDB integration', () => {
     ).toBe(0);
   });
 
+  it('rejects a revoked access token before disclosing a restriction', async () => {
+    const fixture = await createUser('restricted-revoked-access');
+    const login = await authService.login(
+      {
+        email: fixture.email,
+        password: CURRENT_PASSWORD,
+      },
+      { userAgent: 'Restricted access integration' },
+    );
+    const payload = readAccessPayload(login.access_token);
+    const now = new Date();
+
+    await Promise.all([
+      userModel.updateOne(
+        { _id: fixture._id },
+        {
+          $set: {
+            restriction: {
+              type: UserRestrictionType.TEMPORARY_SUSPENSION,
+              effectiveAt: now,
+              expiresAt: new Date(now.getTime() + 60_000),
+              supportReference: 'sup_auth_integration',
+              publicReasonCode: 'community_policy_review',
+            },
+          },
+          $inc: { authzVersion: 1 },
+        },
+      ),
+      sessionModel.updateOne(
+        { userId: fixture._id, publicId: payload.sid },
+        {
+          $set: {
+            revokedAt: now,
+            revokeReason: SessionRevokeReason.ACCOUNT_RESTRICTED,
+          },
+        },
+      ),
+    ]);
+
+    await expect(jwtStrategy.validate(payload)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    await expect(
+      authService.refreshToken(login.refresh_token),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
   it('establishes the first password using OTP', async () => {
     const fixture = await createPasswordlessUser();
     await setResetOtp(fixture._id);

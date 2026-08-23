@@ -35,6 +35,7 @@ import {
 } from '../interfaces/auth-audit.interface';
 import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
 import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 jest.mock('bcrypt', () => ({
   compare: jest.fn(),
@@ -81,6 +82,7 @@ type UserFixture = {
   status: string;
   isDeleted: boolean;
   authzVersion: number;
+  version: number;
   restriction: User['restriction'];
   notificationSettings: NotificationSettings;
   failedLoginAttempts?: number;
@@ -133,6 +135,7 @@ const createUser = (overrides: Partial<UserFixture> = {}): UserFixture => ({
   status: 'active',
   isDeleted: false,
   authzVersion: 0,
+  version: 0,
   restriction: null,
   notificationSettings: {
     enabled: true,
@@ -185,6 +188,12 @@ const createContext = () => {
     record: jest.fn<AuthAuditService['record']>(() => Promise.resolve()),
   };
 
+  const restrictionExpiryService = {
+    convergeForAuthentication: jest.fn<
+      AdminUserRestrictionExpiryService['convergeForAuthentication']
+    >(() => Promise.resolve(null)),
+  };
+
   authSessionService.createSession.mockResolvedValue({
     access_token: 'access-token',
     refresh_token: 'refresh-token',
@@ -196,6 +205,7 @@ const createContext = () => {
     mailService as unknown as MailService,
     authSessionService as unknown as AuthSessionService,
     authAuditService as unknown as AuthAuditService,
+    restrictionExpiryService as unknown as AdminUserRestrictionExpiryService,
   );
 
   return {
@@ -206,6 +216,7 @@ const createContext = () => {
     mailService,
     authSessionService,
     authAuditService,
+    restrictionExpiryService,
   };
 };
 
@@ -429,6 +440,7 @@ describe('AuthService', () => {
       const user = createUser({ restriction: activeRestriction });
       const context = createContext();
       context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(createQuery(user));
       compareMock.mockResolvedValue(true);
 
       await expect(
@@ -438,7 +450,189 @@ describe('AuthService', () => {
         ),
       ).rejects.toBeInstanceOf(AccountRestrictedException);
 
-      expect(context.connection.transaction).not.toHaveBeenCalled();
+      expect(context.connection.transaction).toHaveBeenCalledTimes(1);
+      expect(
+        context.restrictionExpiryService.convergeForAuthentication,
+      ).not.toHaveBeenCalled();
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
+    it('converges when suspension expires while bcrypt is running', async () => {
+      const afterExpiry = new Date(activeRestriction.expiresAt.getTime() + 1);
+      const user = createUser({
+        restriction: activeRestriction,
+        version: 4,
+        authzVersion: 6,
+      });
+      const authenticatedUser = createUser({
+        restriction: activeRestriction,
+        version: 4,
+        authzVersion: 6,
+      });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(
+        createQuery(authenticatedUser),
+      );
+      context.restrictionExpiryService.convergeForAuthentication.mockResolvedValue(
+        {
+          userPublicId: user.publicId,
+          beforeVersion: 4,
+          afterVersion: 5,
+          authzVersion: 7,
+          revokedSessionCount: 1,
+        },
+      );
+      compareMock.mockImplementation(() => {
+        jest.setSystemTime(afterExpiry);
+        return Promise.resolve(true);
+      });
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          message: 'Đăng nhập thành công',
+        }),
+      );
+
+      expect(
+        context.restrictionExpiryService.convergeForAuthentication,
+      ).toHaveBeenCalledWith(
+        authenticatedUser._id,
+        afterExpiry,
+        context.transactionSession,
+      );
+      expect(context.authSessionService.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          restriction: null,
+          version: 5,
+          authzVersion: 7,
+        }),
+        {},
+        context.transactionSession,
+      );
+    });
+
+    it('accepts an expiry-worker authz bump between bcrypt and transaction', async () => {
+      const afterExpiry = new Date(activeRestriction.expiresAt.getTime() + 1);
+      const user = createUser({
+        restriction: activeRestriction,
+        version: 4,
+        authzVersion: 6,
+      });
+      const workerConvergedUser = createUser({
+        restriction: null,
+        version: 5,
+        authzVersion: 7,
+      });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(
+        createQuery(workerConvergedUser),
+      );
+      compareMock.mockImplementation(() => {
+        jest.setSystemTime(afterExpiry);
+        return Promise.resolve(true);
+      });
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          message: 'Đăng nhập thành công',
+        }),
+      );
+
+      const [filter] = context.userModel.findOneAndUpdate.mock.calls[0];
+      expect(filter).not.toHaveProperty('authzVersion');
+      expect(context.authSessionService.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          restriction: null,
+          version: 5,
+          authzVersion: 7,
+        }),
+        {},
+        context.transactionSession,
+      );
+    });
+
+    it('fails closed when a new restriction wins after bcrypt', async () => {
+      const user = createUser();
+      const restrictedUser = createUser({
+        restriction: activeRestriction,
+        version: 1,
+        authzVersion: 1,
+      });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(
+        createQuery(restrictedUser),
+      );
+      compareMock.mockResolvedValue(true);
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(AccountRestrictedException);
+
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when account deletion wins after bcrypt', async () => {
+      const user = createUser();
+      const deletedUser = createUser({ isDeleted: true });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(createQuery(null));
+      context.userModel.findById.mockReturnValue(createQuery(deletedUser));
+      compareMock.mockResolvedValue(true);
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(context.authSessionService.createSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps a concurrent password change generic even if restricted', async () => {
+      const user = createUser();
+      const passwordChangedUser = createUser({
+        password: 'new-password-hash',
+        restriction: activeRestriction,
+        authzVersion: 1,
+      });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(createQuery(null));
+      context.userModel.findById.mockReturnValue(
+        createQuery(passwordChangedUser),
+      );
+      compareMock.mockResolvedValue(true);
+
+      await expect(
+        context.service.login(
+          { email: user.email, password: 'Password@123' },
+          {},
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
       expect(context.authSessionService.createSession).not.toHaveBeenCalled();
     });
 
@@ -608,8 +802,13 @@ describe('AuthService', () => {
     it('creates a session and resets login failure metadata', async () => {
       const user = createUser();
       const authenticatedUser = createUser();
-      const { service, userModel, authSessionService, transactionSession } =
-        createContext();
+      const {
+        service,
+        userModel,
+        authSessionService,
+        transactionSession,
+        restrictionExpiryService,
+      } = createContext();
       const metadata = {
         userAgent: 'Mozilla/5.0 Chrome/126 Windows',
       };
@@ -663,10 +862,67 @@ describe('AuthService', () => {
         }),
       );
 
+      expect(
+        restrictionExpiryService.convergeForAuthentication,
+      ).toHaveBeenCalledWith(authenticatedUser._id, NOW, transactionSession);
       expect(authSessionService.createSession).toHaveBeenCalledWith(
         authenticatedUser,
         metadata,
         transactionSession,
+      );
+      expect(
+        restrictionExpiryService.convergeForAuthentication.mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        authSessionService.createSession.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('uses converged authz state before issuing a session', async () => {
+      const expiredRestriction = {
+        ...activeRestriction,
+        expiresAt: new Date(NOW.getTime() - 1),
+      };
+      const user = createUser({
+        restriction: expiredRestriction,
+        version: 4,
+        authzVersion: 6,
+      });
+      const authenticatedUser = createUser({
+        restriction: expiredRestriction,
+        version: 4,
+        authzVersion: 6,
+      });
+      const context = createContext();
+
+      context.userModel.findOne.mockReturnValue(createQuery(user));
+      context.userModel.findOneAndUpdate.mockReturnValue(
+        createQuery(authenticatedUser),
+      );
+      context.restrictionExpiryService.convergeForAuthentication.mockResolvedValue(
+        {
+          userPublicId: user.publicId,
+          beforeVersion: 4,
+          afterVersion: 5,
+          authzVersion: 7,
+          revokedSessionCount: 1,
+        },
+      );
+      compareMock.mockResolvedValue(true);
+
+      await context.service.login(
+        { email: user.email, password: 'Password@123' },
+        {},
+      );
+
+      expect(context.authSessionService.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          restriction: null,
+          version: 5,
+          authzVersion: 7,
+        }),
+        {},
+        context.transactionSession,
       );
     });
   });

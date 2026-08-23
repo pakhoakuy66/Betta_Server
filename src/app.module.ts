@@ -21,6 +21,7 @@ import { CronModule } from './modules/cron/cron.module';
 import { ReactionModule } from './modules/reactions/reaction.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { OutboxModule } from './common/outbox/outbox.module';
+import { UserModerationNoticeModule } from './modules/users/user-moderation-notice.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { OutboxModule } from './common/outbox/outbox.module';
     }),
     ScheduleModule.forRoot(),
     OutboxModule,
+    UserModerationNoticeModule,
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({

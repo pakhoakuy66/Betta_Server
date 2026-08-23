@@ -9,6 +9,8 @@ import {
   NOTIFICATION_TTL_MS,
 } from '../schemas/notifications.schema';
 import { User } from '../../users/schemas/user.schema';
+import { Post } from '../../posts/schemas/post.schema';
+import { UserModerationNoticeAction } from '../../users/constants/user-moderation-notice.constants';
 import { NotificationsService } from './notifications.service';
 
 type ModelMethod = Mock<(...args: unknown[]) => unknown>;
@@ -35,6 +37,10 @@ type NotificationModelMock = {
 type UserModelMock = {
   find: ModelMethod;
   exists: ModelMethod;
+};
+
+type PostModelMock = {
+  find: ModelMethod;
 };
 
 const RECIPIENT_ID = new Types.ObjectId('6a3924c4f5a540da96575f6a');
@@ -77,16 +83,21 @@ const createContext = () => {
     find: jest.fn(),
     exists: jest.fn(),
   };
+  const postModel: PostModelMock = {
+    find: jest.fn(),
+  };
 
   const service = new NotificationsService(
     notificationModel as unknown as Model<Notification>,
     userModel as unknown as Model<User>,
+    postModel as unknown as Model<Post>,
   );
 
   return {
     service,
     notificationModel,
     userModel,
+    postModel,
   };
 };
 
@@ -95,8 +106,54 @@ describe('NotificationsService', () => {
     jest.clearAllMocks();
   });
 
-  it('lists one page, computes hasMore and exposes only public actor IDs', async () => {
+  it('creates SYSTEM_MODERATION idempotently without consulting preferences', async () => {
     const { service, notificationModel, userModel } = createContext();
+    notificationModel.findOneAndUpdate.mockReturnValue(createQuery({}));
+    const startedAt = Date.now();
+
+    await service.createSystemModerationNotification({
+      recipientId: RECIPIENT_ID,
+      noticePublicId: 'mnot_23456789ABCDEFGHJKLMNP',
+      action: UserModerationNoticeAction.TEMPORARY_SUSPENSION_REMOVED,
+      publicReasonCode: 'account_access_restored',
+      effectiveAt: new Date('2026-08-20T01:00:00.000Z'),
+      expiresAt: null,
+      supportReference: 'sup_23456789ABCD',
+    });
+    const completedAt = Date.now();
+
+    expect(notificationModel.findOneAndUpdate).toHaveBeenCalledWith(
+      { dedupeKey: 'system-moderation:mnot_23456789ABCDEFGHJKLMNP' },
+      {
+        $setOnInsert: expect.objectContaining({
+          recipientId: RECIPIENT_ID,
+          type: NotificationType.SYSTEM_MODERATION,
+          actorIds: [],
+          countedActorIds: [],
+          expiresAt: expect.any(Date),
+          moderation: expect.objectContaining({
+            supportReference: 'sup_23456789ABCD',
+          }),
+        }),
+      },
+      { upsert: true, returnDocument: 'after' },
+    );
+    const update = notificationModel.findOneAndUpdate.mock.calls[0]?.[1] as {
+      $setOnInsert: { expiresAt: Date };
+    };
+    expect(update.$setOnInsert.expiresAt.getTime()).toBeGreaterThanOrEqual(
+      startedAt + NOTIFICATION_TTL_MS,
+    );
+    expect(update.$setOnInsert.expiresAt.getTime()).toBeLessThanOrEqual(
+      completedAt + NOTIFICATION_TTL_MS,
+    );
+    expect(userModel.find).not.toHaveBeenCalled();
+    expect(userModel.exists).not.toHaveBeenCalled();
+  });
+
+  it('lists one page, computes hasMore and exposes only public actor IDs', async () => {
+    const { service, notificationModel, userModel, postModel } =
+      createContext();
     const createdAt = new Date('2026-07-27T10:00:00.000Z');
 
     notificationModel.find.mockReturnValue(
@@ -141,21 +198,31 @@ describe('NotificationsService', () => {
       ]),
     );
     notificationModel.countDocuments.mockReturnValue(createQuery(4));
-    userModel.find.mockReturnValue(
+    userModel.find
+      .mockReturnValueOnce(
+        createQuery([
+          {
+            _id: ACTOR_ID,
+            publicId: 'usr_actor_public',
+            username: 'actor',
+            fullname: 'Actor',
+            avatar: 'https://example.com/actor.webp',
+          },
+          {
+            _id: SECOND_ACTOR_ID,
+            publicId: 'usr_second_actor',
+            username: 'second_actor',
+            fullname: 'Second Actor',
+            avatar: 'https://example.com/second.webp',
+          },
+        ]),
+      )
+      .mockReturnValueOnce(createQuery([{ _id: RECIPIENT_ID }]));
+    postModel.find.mockReturnValue(
       createQuery([
         {
-          _id: ACTOR_ID,
-          publicId: 'usr_actor_public',
-          username: 'actor',
-          fullname: 'Actor',
-          avatar: 'https://example.com/actor.webp',
-        },
-        {
-          _id: SECOND_ACTOR_ID,
-          publicId: 'usr_second_actor',
-          username: 'second_actor',
-          fullname: 'Second Actor',
-          avatar: 'https://example.com/second.webp',
+          publicId: 'post_23456789ABCD',
+          authorId: RECIPIENT_ID,
         },
       ]),
     );
@@ -195,6 +262,58 @@ describe('NotificationsService', () => {
     expect(result.data[0]).not.toHaveProperty('targetId');
     expect(JSON.stringify(result)).not.toContain(NOTIFICATION_ID.toString());
     expect(JSON.stringify(result)).not.toContain(POST_ID.toString());
+  });
+
+  it('redacts reaction actors and deep links when eligibility changes', async () => {
+    const { service, notificationModel, userModel, postModel } =
+      createContext();
+    notificationModel.find.mockReturnValue(
+      createQuery([
+        {
+          publicId: NOTIFICATION_PUBLIC_ID,
+          type: NotificationType.REACTION,
+          actorIds: [ACTOR_ID],
+          actorCount: 1,
+          otherCount: 0,
+          content: 'đã thả tim bài viết của bạn',
+          targetPublicId: 'post_23456789ABCD',
+          isRead: false,
+          createdAt: new Date('2026-08-20T01:00:00.000Z'),
+        },
+      ]),
+    );
+    notificationModel.countDocuments.mockReturnValue(createQuery(1));
+    postModel.find.mockReturnValue(
+      createQuery([
+        {
+          publicId: 'post_23456789ABCD',
+          authorId: ACTOR_ID,
+        },
+      ]),
+    );
+    userModel.find
+      .mockReturnValueOnce(createQuery([]))
+      .mockReturnValueOnce(createQuery([]));
+
+    const result = await service.getNotifications(RECIPIENT_ID.toString(), {
+      page: 1,
+      limit: 20,
+      unreadOnly: false,
+    });
+
+    expect(result.data[0]).toEqual(
+      expect.objectContaining({
+        actors: [],
+        targetPublicId: undefined,
+      }),
+    );
+    expect(userModel.find).toHaveBeenCalledTimes(2);
+    expect(userModel.find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ $or: expect.any(Array) }),
+    );
+    expect(userModel.find.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ $or: expect.any(Array) }),
+    );
   });
 
   it('marks one owned notification as read exactly once', async () => {
@@ -299,13 +418,16 @@ describe('NotificationsService', () => {
       targetUserId: RECIPIENT_ID,
     });
 
-    expect(userModel.exists).toHaveBeenCalledWith({
-      _id: RECIPIENT_ID,
-      isDeleted: false,
-      status: 'active',
-      'notificationSettings.enabled': { $ne: false },
-      'notificationSettings.follow': { $ne: false },
-    });
+    expect(userModel.exists).toHaveBeenCalledWith(
+      expect.objectContaining({
+        _id: RECIPIENT_ID,
+        isDeleted: false,
+        status: 'active',
+        $or: expect.any(Array),
+        'notificationSettings.enabled': { $ne: false },
+        'notificationSettings.follow': { $ne: false },
+      }),
+    );
     expect(notificationModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 

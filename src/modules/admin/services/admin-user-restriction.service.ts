@@ -218,7 +218,10 @@ export class AdminUserRestrictionService {
             userPublicId: updated.publicId,
             restrictionType: normalized.restrictionType,
             restriction: updated.restriction
-              ? toPublicUserRestriction(updated.restriction)
+              ? {
+                  ...toPublicUserRestriction(updated.restriction),
+                  publicReasonCode: updated.restriction.publicReasonCode,
+                }
               : null,
             beforeVersion: snapshot.version,
             afterVersion: updated.version,

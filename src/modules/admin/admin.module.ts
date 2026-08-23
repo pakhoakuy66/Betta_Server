@@ -19,6 +19,7 @@ import {
 } from './config/admin-secrets.config';
 import { AUTH_SECRET_MATERIAL_BOUNDARY_PROVIDER } from './config/auth-secret-material-boundary.config';
 import { ADMIN_AUTHORIZATION_CLOCK_PROVIDER } from './constants/admin-authorization-state.constants';
+import { ADMIN_USER_RESTRICTION_EXPIRY_CLOCK_PROVIDER } from './constants/admin-user-restriction-expiry.constants';
 import { AdminAuditController } from './controllers/admin-audit.controller';
 import { AdminAccountLifecycleController } from './controllers/admin-account-lifecycle.controller';
 import { AdminAccountQueryController } from './controllers/admin-account-query.controller';
@@ -27,6 +28,7 @@ import { AdminAccountDeletionController } from './controllers/admin-account-dele
 import { AdminUserQueryController } from './controllers/admin-user-query.controller';
 import { AdminUserRestrictionController } from './controllers/admin-user-restriction.controller';
 import { AdminUserDeletionController } from './controllers/admin-user-deletion.controller';
+import { AdminUserModerationHistoryController } from './controllers/admin-user-moderation-history.controller';
 import { AdminActivationController } from './controllers/admin-activation.controller';
 import { AdminAuthController } from './controllers/admin-auth.controller';
 import { AdminAuthOriginGuard } from './guards/admin-auth-origin.guard';
@@ -103,11 +105,13 @@ import {
   AdminUserRestrictionRequestSchema,
 } from './schemas/admin-user-restriction-request.schema';
 import { AdminUserRestrictionService } from './services/admin-user-restriction.service';
+import { AdminUserRestrictionExpiryService } from './services/admin-user-restriction-expiry.service';
 import {
   AdminUserDeletionRequest,
   AdminUserDeletionRequestSchema,
 } from './schemas/admin-user-deletion-request.schema';
 import { AdminUserDeletionService } from './services/admin-user-deletion.service';
+import { AdminUserModerationHistoryService } from './services/admin-user-moderation-history.service';
 
 @Module({
   imports: [
@@ -157,6 +161,7 @@ import { AdminUserDeletionService } from './services/admin-user-deletion.service
     AdminAccountDeletionController,
     AdminUserRestrictionController,
     AdminUserDeletionController,
+    AdminUserModerationHistoryController,
   ],
   providers: [
     AdminUserQueryService,
@@ -165,6 +170,7 @@ import { AdminUserDeletionService } from './services/admin-user-deletion.service
     AUTH_SECRET_MATERIAL_BOUNDARY_PROVIDER,
     ADMIN_SECRETS_PROVIDER,
     ADMIN_AUTHORIZATION_CLOCK_PROVIDER,
+    ADMIN_USER_RESTRICTION_EXPIRY_CLOCK_PROVIDER,
     AdminAccessTokenService,
     AdminAuthorizationStateService,
     AdminAuditService,
@@ -198,7 +204,9 @@ import { AdminUserDeletionService } from './services/admin-user-deletion.service
     AdminAccountDeletionService,
     AdminLastSuperAdminInvariantService,
     AdminUserRestrictionService,
+    AdminUserRestrictionExpiryService,
     AdminUserDeletionService,
+    AdminUserModerationHistoryService,
     {
       provide: ADMIN_RECOVERY_SECRET_STORE,
       useClass: AdminRecoveryCommandSecretStore,
@@ -229,7 +237,9 @@ import { AdminUserDeletionService } from './services/admin-user-deletion.service
     AdminAccountDeletionService,
     AdminLastSuperAdminInvariantService,
     AdminUserRestrictionService,
+    AdminUserRestrictionExpiryService,
     AdminUserDeletionService,
+    AdminUserModerationHistoryService,
   ],
 })
 export class AdminModule {}

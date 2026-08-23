@@ -301,11 +301,14 @@ describe('PostsService', () => {
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
 
-      expect(models.user.findOne).toHaveBeenCalledWith({
-        _id: CURRENT_USER_ID,
-        isDeleted: false,
-        status: 'active',
-      });
+      expect(models.user.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _id: CURRENT_USER_ID,
+          isDeleted: false,
+          status: 'active',
+          $or: expect.any(Array),
+        }),
+      );
 
       expect(uploadsService.uploadPostImages).not.toHaveBeenCalled();
     });

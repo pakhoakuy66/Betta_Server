@@ -1,11 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron, CronExpression, Interval } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { ReactionCleanupService } from '../../reactions/services/reaction-cleanup.service';
 import { ExpiredPostCleanupService } from './expired-post-cleanup.service';
 import { StreakService } from '../../streak/services/streak.service';
 import { WeeklyRecapJobService } from '../../recap/services/weekly-recap-job.service';
 import { RECAP_TIMEZONE } from '../../recap/utils/recap-week.util';
+import { ADMIN_USER_RESTRICTION_EXPIRY_INTERVAL_MS } from '../../admin/constants/admin-user-restriction-expiry.constants';
+import { AdminUserRestrictionExpiryService } from '../../admin/services/admin-user-restriction-expiry.service';
 
 @Injectable()
 export class TasksService {
@@ -14,14 +16,47 @@ export class TasksService {
   private isStreakDecayRunning = false;
   private isWeeklyRecapRunning = false;
   private isReactionCleanupRunning = false;
+  private isRestrictionExpiryRunning = false;
 
   constructor(
     private readonly expiredPostCleanupService: ExpiredPostCleanupService,
     private readonly streakService: StreakService,
     private readonly weeklyRecapJobService: WeeklyRecapJobService,
     private readonly reactionCleanupService: ReactionCleanupService,
+    private readonly restrictionExpiryService: AdminUserRestrictionExpiryService,
     private readonly configService: ConfigService,
   ) {}
+
+  @Interval(ADMIN_USER_RESTRICTION_EXPIRY_INTERVAL_MS)
+  async handleRestrictionExpiry(): Promise<void> {
+    if (this.isRestrictionExpiryRunning) {
+      return;
+    }
+
+    this.isRestrictionExpiryRunning = true;
+
+    try {
+      const result =
+        await this.restrictionExpiryService.expireDueRestrictions();
+
+      if (result.failed > 0) {
+        this.logger.error(
+          'Restriction expiry batch failed ' + JSON.stringify(result),
+        );
+      } else if (result.expired > 0) {
+        this.logger.log(
+          'Restriction expiry batch finished ' + JSON.stringify(result),
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        'Restriction expiry job crashed',
+        error instanceof Error ? error.stack : String(error),
+      );
+    } finally {
+      this.isRestrictionExpiryRunning = false;
+    }
+  }
 
   @Cron(CronExpression.EVERY_MINUTE)
   async handleExpiredPostCleanup(): Promise<void> {

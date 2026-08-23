@@ -3,6 +3,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import { User } from '../../users/schemas/user.schema';
 import { StreakHistory } from '../schemas/streak.schema';
+import { buildEligibleUserMatch } from '../../users/policies/user-eligibility.policy';
 
 const STREAK_TIMEZONE = 'Asia/Ho_Chi_Minh';
 const DAILY_POST_STREAK_INCREMENT = 1;
@@ -91,6 +92,7 @@ export class StreakService {
     occurredAt = new Date(),
   ): Promise<StreakUpdateResult> {
     const dateKey = this.toLocalDateKey(occurredAt);
+    const eligibilityAt = new Date();
     const session = await this.connection.startSession();
 
     try {
@@ -134,8 +136,7 @@ export class StreakService {
           .findOneAndUpdate(
             {
               _id: userId,
-              isDeleted: false,
-              status: 'active',
+              ...buildEligibleUserMatch(eligibilityAt),
             },
             {
               $inc: {
@@ -295,12 +296,12 @@ export class StreakService {
       userId instanceof Types.ObjectId ? userId : new Types.ObjectId(userId);
 
     const safeLimit = Math.min(Math.max(limit, 1), 90);
+    const now = new Date();
 
     const user = await this.userModel
       .findOne({
         _id: userObjectId,
-        isDeleted: false,
-        status: 'active',
+        ...buildEligibleUserMatch(now),
       })
       .select('streakCount')
       .lean<{ streakCount: number }>()

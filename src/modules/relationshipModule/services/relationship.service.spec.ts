@@ -180,11 +180,14 @@ describe('RelationshipService', () => {
         service.followUser(CURRENT_USER_ID.toString(), 'usr_tXdqiPs9aK'),
       ).rejects.toBeInstanceOf(NotFoundException);
 
-      expect(userModel.findOne).toHaveBeenCalledWith({
-        publicId: 'usr_tXdqiPs9aK',
-        isDeleted: false,
-        status: 'active',
-      });
+      expect(userModel.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          publicId: 'usr_tXdqiPs9aK',
+          isDeleted: false,
+          status: 'active',
+          $or: expect.any(Array),
+        }),
+      );
     });
 
     it('rejects following the current user', async () => {
@@ -305,22 +308,24 @@ describe('RelationshipService', () => {
 
       expect(userModel.updateOne).toHaveBeenNthCalledWith(
         3,
-        {
+        expect.objectContaining({
           _id: CURRENT_USER_ID,
           isDeleted: false,
           status: 'active',
-        },
+          $or: expect.any(Array),
+        }),
         { $inc: { followingCount: 1 } },
         { session },
       );
 
       expect(userModel.updateOne).toHaveBeenNthCalledWith(
         4,
-        {
+        expect.objectContaining({
           _id: TARGET_USER_ID,
           isDeleted: false,
           status: 'active',
-        },
+          $or: expect.any(Array),
+        }),
         { $inc: { followersCount: 1 } },
         { session },
       );

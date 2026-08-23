@@ -8,9 +8,11 @@ import { RecapModule } from '../recap/recap.module';
 import { ReactionModule } from '../reactions/reaction.module';
 import { TasksService } from './services/tasks.service';
 import { ExpiredPostCleanupService } from './services/expired-post-cleanup.service';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
   imports: [
+    AdminModule,
     StreakModule,
     RecapModule,
     ReactionModule,
