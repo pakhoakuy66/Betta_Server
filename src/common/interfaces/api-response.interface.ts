@@ -15,6 +15,11 @@ export interface ApiErrorResponse {
   path: string;
   retryAfterSeconds?: number;
   publicRestriction?: PublicAccountRestriction;
+  challenge?: {
+    token: string;
+    difficultyBits: number;
+    expiresAt: string;
+  };
 }
 
 export const createSuccessResponse = <T>(

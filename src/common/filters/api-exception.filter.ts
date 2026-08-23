@@ -24,6 +24,7 @@ const ERROR_CODES: Readonly<Record<number, string>> = {
   404: 'NOT_FOUND',
   409: 'CONFLICT',
   413: 'PAYLOAD_TOO_LARGE',
+  428: 'PRECONDITION_REQUIRED',
   429: 'RATE_LIMITED',
   500: 'INTERNAL_SERVER_ERROR',
   503: 'SERVICE_UNAVAILABLE',
@@ -51,6 +52,40 @@ const normalizeRetryAfter = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value > 0
     ? Math.ceil(value)
     : undefined;
+
+const normalizeChallenge = (
+  value: unknown,
+): { token: string; difficultyBits: number; expiresAt: string } | undefined => {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value);
+  if (
+    keys.some(
+      (key) => !['token', 'difficultyBits', 'expiresAt'].includes(key),
+    ) ||
+    typeof value.token !== 'string' ||
+    value.token.length < 20 ||
+    value.token.length > 4096 ||
+    typeof value.difficultyBits !== 'number' ||
+    !Number.isInteger(value.difficultyBits) ||
+    value.difficultyBits < 8 ||
+    value.difficultyBits > 24 ||
+    typeof value.expiresAt !== 'string'
+  ) {
+    return undefined;
+  }
+  const expiresAt = new Date(value.expiresAt);
+  if (
+    Number.isNaN(expiresAt.getTime()) ||
+    expiresAt.toISOString() !== value.expiresAt
+  ) {
+    return undefined;
+  }
+  return {
+    token: value.token,
+    difficultyBits: value.difficultyBits,
+    expiresAt: value.expiresAt,
+  };
+};
 
 const getPathname = (request: Request): string => {
   try {
@@ -93,6 +128,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
       statusCode === 403 && body.error === ACCOUNT_RESTRICTED_ERROR
         ? normalizePublicAccountRestriction(body.publicRestriction)
         : undefined;
+    const challenge =
+      statusCode === 428 && body.error === 'ACCESS_SUPPORT_CHALLENGE_REQUIRED'
+        ? normalizeChallenge(body.challenge)
+        : undefined;
 
     const path = getPathname(request);
 
@@ -123,12 +162,15 @@ export class ApiExceptionFilter implements ExceptionFilter {
         ? 'VALIDATION_ERROR'
         : publicRestriction
           ? ACCOUNT_RESTRICTED_ERROR
-          : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
+          : challenge
+            ? 'ACCESS_SUPPORT_CHALLENGE_REQUIRED'
+            : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
       message,
       timestamp: new Date().toISOString(),
       path,
       ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       ...(publicRestriction ? { publicRestriction } : {}),
+      ...(challenge ? { challenge } : {}),
     };
 
     if (statusCode >= INTERNAL_SERVER_ERROR_STATUS) {

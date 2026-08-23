@@ -8,6 +8,16 @@ export enum SystemReportStatus {
   CLOSED = 'closed',
 }
 
+export enum SystemReportSource {
+  USER_AUTHENTICATED = 'USER_AUTHENTICATED',
+  AUTH_PUBLIC = 'AUTH_PUBLIC',
+}
+
+export enum SystemReportType {
+  SYSTEM_ISSUE = 'SYSTEM_ISSUE',
+  ACCOUNT_ACCESS = 'ACCOUNT_ACCESS',
+}
+
 export enum RetentionCleanupStatus {
   PENDING = 'pending',
   PROCESSING = 'processing',
@@ -32,8 +42,46 @@ export const SystemReportEvidenceSchema =
   collection: 'system_reports',
 })
 export class SystemReport extends Document {
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
-  reporterId!: Types.ObjectId;
+  @Prop({ type: String, default: null })
+  publicId!: string | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null, index: true })
+  reporterId!: Types.ObjectId | null;
+
+  @Prop({
+    type: String,
+    enum: Object.values(SystemReportSource),
+    default: SystemReportSource.USER_AUTHENTICATED,
+  })
+  source!: SystemReportSource;
+
+  @Prop({
+    type: String,
+    enum: Object.values(SystemReportType),
+    default: SystemReportType.SYSTEM_ISSUE,
+  })
+  reportType!: SystemReportType;
+
+  @Prop({ type: String, default: null })
+  category!: string | null;
+
+  @Prop({ type: String, default: null, select: false })
+  encryptedContactEmail!: string | null;
+
+  @Prop({ type: String, default: null, select: false })
+  contactLookupHmac!: string | null;
+
+  @Prop({ type: String, default: null, select: false })
+  encryptedAccountIdentifier!: string | null;
+
+  @Prop({ type: String, default: null, select: false })
+  requestFingerprintHmac!: string | null;
+
+  @Prop({ type: String, default: null, maxlength: 128 })
+  correlationId!: string | null;
+
+  @Prop({ type: Number, default: 0, min: 0 })
+  version!: number;
 
   @Prop({ type: String, required: true, trim: true, maxlength: 2000 })
   description!: string;
@@ -91,6 +139,24 @@ SystemReportSchema.index(
       dedupeKey: { $type: 'string' },
     },
   },
+);
+
+SystemReportSchema.index(
+  { publicId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { publicId: { $type: 'string' } },
+  },
+);
+SystemReportSchema.index({
+  source: 1,
+  reportType: 1,
+  status: 1,
+  createdAt: -1,
+});
+SystemReportSchema.index(
+  { requestFingerprintHmac: 1, createdAt: -1 },
+  { partialFilterExpression: { requestFingerprintHmac: { $type: 'string' } } },
 );
 
 SystemReportSchema.index({ reporterId: 1, createdAt: -1 });

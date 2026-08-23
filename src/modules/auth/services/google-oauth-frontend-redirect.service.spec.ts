@@ -28,6 +28,25 @@ describe('GoogleOAuthFrontendRedirectService', () => {
     );
   });
 
+  it('puts only the public restriction allowlist in a URL fragment', () => {
+    const service = createService({
+      NODE_ENV: 'developer',
+      CORS_ALLOWED_ORIGINS: 'http://localhost:5173',
+      GOOGLE_OAUTH_FRONTEND_ORIGIN: 'http://localhost:5173',
+    });
+    const url = service.createRestrictionUrl({
+      type: 'INDEFINITE_BAN',
+      effectiveAt: '2026-08-21T01:00:00.000Z',
+      expiresAt: null,
+      supportReference: 'sup_12345678',
+    });
+    expect(url).toMatch(
+      /^http:\/\/localhost:5173\/account-restricted#restriction=/,
+    );
+    expect(url).not.toContain('?');
+    expect(url).not.toContain('reason');
+  });
+
   it('accepts an HTTPS production origin', () => {
     expect(() =>
       createService({

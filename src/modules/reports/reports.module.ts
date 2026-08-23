@@ -26,6 +26,16 @@ import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 import { UploadsModule } from '../uploads/uploads.module';
 import { ReportIssueUploadRateLimitGuard } from './guards/report-issue-upload-rate-limit.guard';
 import { ReportStatusTransitionService } from './services/report-status-transition.service';
+import { AccessSupportSecretsConfig } from './config/access-support-secrets.config';
+import { AccessSupportCryptoService } from './services/access-support-crypto.service';
+import { AccessSupportRateLimitService } from './services/access-support-rate-limit.service';
+import { AccessSupportService } from './services/access-support.service';
+import { AccessSupportBodyLimitGuard } from './guards/access-support-body-limit.guard';
+import {
+  AccessSupportDedupe,
+  AccessSupportDedupeSchema,
+} from './schemas/access-support-dedupe.schema';
+import { AccessSupportDedupeService } from './services/access-support-dedupe.service';
 
 @Module({
   imports: [
@@ -39,6 +49,7 @@ import { ReportStatusTransitionService } from './services/report-status-transiti
       { name: User.name, schema: UserSchema },
       { name: Relationship.name, schema: RelationshipSchema },
       { name: Block.name, schema: BlockSchema },
+      { name: AccessSupportDedupe.name, schema: AccessSupportDedupeSchema },
     ]),
   ],
   providers: [
@@ -46,6 +57,12 @@ import { ReportStatusTransitionService } from './services/report-status-transiti
     ReportRateLimitService,
     ReportIssueUploadRateLimitGuard,
     ReportStatusTransitionService,
+    AccessSupportSecretsConfig,
+    AccessSupportCryptoService,
+    AccessSupportRateLimitService,
+    AccessSupportService,
+    AccessSupportBodyLimitGuard,
+    AccessSupportDedupeService,
   ],
   controllers: [ReportsController],
   exports: [ReportStatusTransitionService],

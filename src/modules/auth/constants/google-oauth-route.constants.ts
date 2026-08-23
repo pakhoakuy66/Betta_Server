@@ -25,3 +25,5 @@ export const GOOGLE_OAUTH_FRONTEND_REGISTRATION_PATH = '/auth/google/register';
 export const GOOGLE_OAUTH_FRONTEND_CANCELLED_PATH = '/auth/google/cancelled';
 
 export const GOOGLE_OAUTH_FRONTEND_ERROR_PATH = '/auth/google/error';
+
+export const GOOGLE_OAUTH_FRONTEND_RESTRICTED_PATH = '/account-restricted';

@@ -1,13 +1,17 @@
 import type { AuthenticatedRequest } from '../../../common/types/authenticated-request';
 
-export type ReportRequest = AuthenticatedRequest & {
+export type PublicReportRequest = {
   ip?: string;
   socket?: {
     remoteAddress?: string | null;
   };
 };
 
-export const getRequestIp = (request: ReportRequest): string | undefined => {
+export type ReportRequest = AuthenticatedRequest & PublicReportRequest;
+
+export const getRequestIp = (
+  request: PublicReportRequest,
+): string | undefined => {
   const requestIp = request.ip?.trim();
 
   if (requestIp) {

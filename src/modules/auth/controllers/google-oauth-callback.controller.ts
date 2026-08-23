@@ -29,6 +29,8 @@ import {
 } from '../services/google-oauth-frontend-redirect.service';
 import { GoogleOAuthSessionHandoffCookieService } from '../services/google-oauth-session-handoff-cookie.service';
 import { GoogleOAuthStateCookieService } from '../services/google-oauth-state-cookie.service';
+import { AccountRestrictedException } from '../exceptions/account-restricted.exception';
+import { normalizePublicAccountRestriction } from '../../../common/security/public-account-restriction';
 
 const INVALID_CALLBACK_MESSAGE = 'Yeu cau callback Google OAuth khong hop le';
 
@@ -103,6 +105,25 @@ export class GoogleOAuthCallbackController {
       }
     } catch (error: unknown) {
       this.stateCookieService.clear(response);
+
+      if (error instanceof AccountRestrictedException) {
+        const raw = error.getResponse();
+        const body =
+          typeof raw === 'object' && raw !== null
+            ? (raw as Record<string, unknown>)
+            : {};
+        const publicRestriction = normalizePublicAccountRestriction(
+          body.publicRestriction,
+        );
+        if (!publicRestriction) {
+          throw new TypeError('Invalid public account restriction');
+        }
+        this.sendEmptyRedirect(
+          response,
+          this.redirectService.createRestrictionUrl(publicRestriction),
+        );
+        return;
+      }
 
       if (error instanceof GoogleOAuthTransactionInvalidException) {
         this.sendEmptyRedirect(

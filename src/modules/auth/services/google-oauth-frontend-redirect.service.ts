@@ -11,7 +11,9 @@ import {
   GOOGLE_OAUTH_FRONTEND_LINK_PATH,
   GOOGLE_OAUTH_FRONTEND_REGISTRATION_PATH,
   GOOGLE_OAUTH_FRONTEND_SESSION_PATH,
+  GOOGLE_OAUTH_FRONTEND_RESTRICTED_PATH,
 } from '../constants/google-oauth-route.constants';
+import type { PublicAccountRestriction } from '../../../common/security/public-account-restriction';
 
 const DEFAULT_DEVELOPER_ORIGIN = 'http://localhost:5173';
 
@@ -21,6 +23,7 @@ export enum GoogleOAuthFrontendDestination {
   REGISTRATION = 'REGISTRATION',
   CANCELLED = 'CANCELLED',
   ERROR = 'ERROR',
+  RESTRICTED = 'RESTRICTED',
 }
 
 const DESTINATION_PATHS: Readonly<
@@ -33,6 +36,8 @@ const DESTINATION_PATHS: Readonly<
   [GoogleOAuthFrontendDestination.CANCELLED]:
     GOOGLE_OAUTH_FRONTEND_CANCELLED_PATH,
   [GoogleOAuthFrontendDestination.ERROR]: GOOGLE_OAUTH_FRONTEND_ERROR_PATH,
+  [GoogleOAuthFrontendDestination.RESTRICTED]:
+    GOOGLE_OAUTH_FRONTEND_RESTRICTED_PATH,
 };
 
 @Injectable()
@@ -70,6 +75,14 @@ export class GoogleOAuthFrontendRedirectService {
       DESTINATION_PATHS[destination],
       `${this.frontendOrigin}/`,
     ).toString();
+  }
+
+  createRestrictionUrl(restriction: PublicAccountRestriction): string {
+    const url = this.createUrl(GoogleOAuthFrontendDestination.RESTRICTED);
+    const fragment = Buffer.from(JSON.stringify(restriction), 'utf8').toString(
+      'base64url',
+    );
+    return `${url}#restriction=${fragment}`;
   }
 
   private readEnvironment(value: string | undefined): AppEnvironment {
