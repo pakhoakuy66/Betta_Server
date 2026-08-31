@@ -8,9 +8,10 @@ import {
   applyTrustProxyConfiguration,
   type TrustProxyApplication,
 } from './common/config/trust-proxy.config';
+import { installAccessSupportAttemptMiddleware } from './modules/reports/middleware/access-support-attempt.middleware';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   const configService = app.get(ConfigService);
 
@@ -19,6 +20,7 @@ async function bootstrap() {
     .getInstance() as unknown as TrustProxyApplication;
 
   applyTrustProxyConfiguration(expressApplication, configService);
+  installAccessSupportAttemptMiddleware(app);
 
   // 1. Kích hoạt Logger (Công cụ ghi chép hệ thống siêu cấp của Nest)
   const logger = new Logger('BettaSystem');

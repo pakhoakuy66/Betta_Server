@@ -23,6 +23,11 @@ export const ACCESS_SUPPORT_ACCOUNT_IDENTIFIER_MAX_LENGTH = 254;
 export const ACCESS_SUPPORT_CORRELATION_ID_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 export const ACCESS_SUPPORT_BODY_MAX_BYTES = 12 * 1024;
+export const ACCESS_SUPPORT_CONTENT_TYPE = 'application/json';
+export const ACCESS_SUPPORT_HTTP_PATH = '/api/v1/reports/access-issues';
+export const ACCESS_SUPPORT_CHALLENGE_HEADER = 'x-access-support-challenge';
+export const ACCESS_SUPPORT_ROUTE_CHALLENGE_FINGERPRINT =
+  'access-support-public-route-v1';
 export const ACCESS_SUPPORT_IP_LIMIT = 10;
 export const ACCESS_SUPPORT_IP_WINDOW_SECONDS = 15 * 60;
 export const ACCESS_SUPPORT_CHALLENGE_FROM_REQUEST = 3;

@@ -5,7 +5,6 @@ import {
   Param,
   Post,
   Request,
-  Res,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -16,7 +15,6 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { ReportsService } from '../services/reports.service';
@@ -25,10 +23,13 @@ import { ReportUserDto } from '../dto/report-user.dto';
 import { ReportIssueDto } from '../dto/report-issue.dto';
 import { ReportIssueUploadRateLimitGuard } from '../guards/report-issue-upload-rate-limit.guard';
 import { getRequestIp, type ReportRequest } from '../utils/request-ip.util';
-import type { PublicReportRequest } from '../utils/request-ip.util';
 import { AccessSupportRequestDto } from '../dto/access-support-request.dto';
 import { AccessSupportBodyLimitGuard } from '../guards/access-support-body-limit.guard';
 import { AccessSupportService } from '../services/access-support.service';
+import {
+  type AccessSupportAttemptRequest,
+  hasAccessSupportIpAttempt,
+} from '../utils/access-support-attempt.util';
 
 type UploadFile = {
   buffer: Buffer;
@@ -38,7 +39,6 @@ type UploadFile = {
 };
 
 @ApiTags('Reports')
-@ApiBearerAuth('access-token')
 @Controller('reports')
 export class ReportsController {
   constructor(
@@ -50,22 +50,20 @@ export class ReportsController {
   @UseGuards(AccessSupportBodyLimitGuard)
   @ApiOperation({ summary: 'Gửi yêu cầu hỗ trợ truy cập tài khoản' })
   reportAccessIssue(
-    @Request() request: PublicReportRequest,
+    @Request() request: AccessSupportAttemptRequest,
     @Body() dto: AccessSupportRequestDto,
-    @Res({ passthrough: true }) response: Response,
     @Headers('x-access-support-challenge') challenge?: string,
   ) {
-    response.setHeader('Cache-Control', 'no-store, max-age=0');
-    response.setHeader('Pragma', 'no-cache');
-    response.setHeader('Referrer-Policy', 'no-referrer');
     return this.accessSupportService.submit(
       dto,
       getRequestIp(request),
       challenge,
+      hasAccessSupportIpAttempt(request),
     );
   }
 
   @Post('issues')
+  @ApiBearerAuth('access-token')
   @UseGuards(AuthGuard('jwt'), ReportIssueUploadRateLimitGuard)
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Báo cáo sự cố hệ thống' })
@@ -91,6 +89,7 @@ export class ReportsController {
   }
 
   @Post('posts/:publicId')
+  @ApiBearerAuth('access-token')
   @UseGuards(AuthGuard('jwt'))
   @ApiOperation({ summary: 'Báo cáo bài viết theo publicId' })
   reportPost(
@@ -107,6 +106,7 @@ export class ReportsController {
   }
 
   @Post('users/:publicId')
+  @ApiBearerAuth('access-token')
   @UseGuards(AuthGuard('jwt'))
   @ApiOperation({ summary: 'Báo cáo tài khoản theo publicId' })
   reportUser(

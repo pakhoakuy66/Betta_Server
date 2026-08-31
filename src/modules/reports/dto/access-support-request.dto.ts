@@ -2,11 +2,11 @@ import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsIn,
-  IsOptional,
   IsString,
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import {
   ACCESS_SUPPORT_ACCOUNT_IDENTIFIER_MAX_LENGTH,
@@ -39,13 +39,13 @@ export class AccessSupportRequestDto {
   description!: string;
 
   @Transform(trim)
-  @IsOptional()
+  @ValidateIf((_object, value: unknown) => value !== undefined)
   @IsString()
   @MaxLength(ACCESS_SUPPORT_ACCOUNT_IDENTIFIER_MAX_LENGTH)
   accountEmailOrUsername?: string;
 
   @Transform(trim)
-  @IsOptional()
+  @ValidateIf((_object, value: unknown) => value !== undefined)
   @IsString()
   @Matches(ACCESS_SUPPORT_CORRELATION_ID_PATTERN)
   correlationId?: string;

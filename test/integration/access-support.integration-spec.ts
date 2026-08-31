@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, jest } from '@jest/globals';
 import { ConfigService } from '@nestjs/config';
 import { HttpException } from '@nestjs/common';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { createConnection, type Connection, type Model } from 'mongoose';
 import { AccessSupportSecretsConfig } from '../../src/modules/reports/config/access-support-secrets.config';
 import { AccessSupportChallengeRequiredException } from '../../src/modules/reports/exceptions/access-support-challenge-required.exception';
@@ -29,6 +29,33 @@ const keyring = (byte: number, id: string) =>
   JSON.stringify({
     current: { id, keyBase64: Buffer.alloc(32, byte).toString('base64') },
   });
+
+type ChallengeBody = Readonly<{
+  challenge: Readonly<{
+    token: string;
+    difficultyBits: number;
+  }>;
+}>;
+
+const hasLeadingZeroBits = (value: Buffer, bits: number): boolean => {
+  const bytes = Math.floor(bits / 8);
+  const remainder = bits % 8;
+  for (let index = 0; index < bytes; index += 1) {
+    if (value[index] !== 0) return false;
+  }
+  return remainder === 0 || value[bytes] >> (8 - remainder) === 0;
+};
+
+const solveChallenge = (token: string, difficultyBits: number): string => {
+  for (let candidate = 0; candidate < 2 ** 24; candidate += 1) {
+    const solution = candidate.toString(36);
+    const digest = createHash('sha256').update(`${token}:${solution}`).digest();
+    if (hasLeadingZeroBits(digest, difficultyBits)) {
+      return `${token}.${solution}`;
+    }
+  }
+  throw new Error('Không tìm được challenge solution trong test budget');
+};
 
 jest.setTimeout(90_000);
 
@@ -117,6 +144,14 @@ describe('Public access-support MongoDB integration', () => {
     });
     expect(document?.encryptedContactEmail).toMatch(/^asenc\.v1\./);
     expect(JSON.stringify(document)).not.toContain('person@example.com');
+    const safeProjection = await systemReports
+      .findOne({ publicId: first.reportPublicId })
+      .lean<Record<string, unknown>>()
+      .exec();
+    expect(safeProjection).not.toHaveProperty('encryptedContactEmail');
+    expect(safeProjection).not.toHaveProperty('contactLookupHmac');
+    expect(safeProjection).not.toHaveProperty('encryptedAccountIdentifier');
+    expect(safeProjection).not.toHaveProperty('requestFingerprintHmac');
     expect(await connection.collection('users').countDocuments()).toBe(0);
     expect(await connection.collection('system_reports').countDocuments()).toBe(
       1,
@@ -235,5 +270,105 @@ describe('Public access-support MongoDB integration', () => {
         rateLimit.consumeIp('127.0.0.9', 'same-fingerprint'),
       ]),
     ).resolves.toEqual([undefined, undefined]);
+  });
+
+  it('counts credential-like attempts and requires challenge on request three', async () => {
+    const credentialPayload = {
+      category: 'LOGIN_PROBLEM' as const,
+      contactEmail: 'credential-attempt@example.com',
+      description: 'Tôi không đăng nhập được, password: do-not-store-this',
+    };
+    const ip = '127.0.0.88';
+
+    await expect(service.submit(credentialPayload, ip)).rejects.toBeInstanceOf(
+      HttpException,
+    );
+    await expect(service.submit(credentialPayload, ip)).rejects.toBeInstanceOf(
+      HttpException,
+    );
+    await expect(service.submit(credentialPayload, ip)).rejects.toBeInstanceOf(
+      AccessSupportChallengeRequiredException,
+    );
+
+    expect(
+      JSON.stringify(
+        await connection.collection('system_reports').find({}).toArray(),
+      ),
+    ).not.toContain('do-not-store-this');
+  });
+
+  it('applies contact rate limiting before cross-IP duplicate replay', async () => {
+    const dto = {
+      category: 'PASSWORD_RESET_OR_OTP' as const,
+      contactEmail: 'cross-ip-replay@example.com',
+      description: 'Tôi cần hỗ trợ đặt lại quyền truy cập tài khoản hiện tại.',
+    };
+
+    const first = await service.submit(dto, '127.0.0.101');
+    const second = await service.submit(dto, '127.0.0.102');
+    const third = await service.submit(dto, '127.0.0.103');
+
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
+    await expect(service.submit(dto, '127.0.0.104')).rejects.toMatchObject({
+      status: 429,
+    });
+    expect(
+      await connection.collection('system_reports').countDocuments({
+        publicId: first.reportPublicId,
+      }),
+    ).toBe(1);
+  });
+
+  it('enforces contact HMAC at three requests per rolling policy window', async () => {
+    const contactLookupHmac = crypto.hmac(
+      'contact-lookup',
+      'contact-flood@example.com',
+    );
+
+    await expect(
+      Promise.all([
+        rateLimit.consumeContact(contactLookupHmac),
+        rateLimit.consumeContact(contactLookupHmac),
+        rateLimit.consumeContact(contactLookupHmac),
+      ]),
+    ).resolves.toEqual([undefined, undefined, undefined]);
+
+    await expect(
+      rateLimit.consumeContact(contactLookupHmac),
+    ).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('requires proof-of-work from request three and caps an IP at ten requests', async () => {
+    const ip = '127.0.0.77';
+    const fingerprint = 'ip-limit-fingerprint';
+
+    await rateLimit.consumeIp(ip, fingerprint);
+    await rateLimit.consumeIp(ip, fingerprint);
+
+    let challengeError: AccessSupportChallengeRequiredException | undefined;
+    try {
+      await rateLimit.consumeIp(ip, fingerprint);
+    } catch (error: unknown) {
+      if (error instanceof AccessSupportChallengeRequiredException) {
+        challengeError = error;
+      } else {
+        throw error;
+      }
+    }
+    expect(challengeError).toBeDefined();
+    const challengeBody = challengeError?.getResponse() as ChallengeBody;
+    const challengeHeader = solveChallenge(
+      challengeBody.challenge.token,
+      challengeBody.challenge.difficultyBits,
+    );
+
+    for (let requestNumber = 4; requestNumber <= 10; requestNumber += 1) {
+      await rateLimit.consumeIp(ip, fingerprint, challengeHeader);
+    }
+
+    await expect(
+      rateLimit.consumeIp(ip, fingerprint, challengeHeader),
+    ).rejects.toMatchObject({ status: 429 });
   });
 });
