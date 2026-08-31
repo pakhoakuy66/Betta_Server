@@ -491,7 +491,7 @@ describe('ReportsService', () => {
 
       await expect(
         service.reportPost(REPORTER_ID.toString(), 'invalid-post', {
-          reasonDetail: 'Nội dung vi phạm',
+          reasonCode: 'violence_hate',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
 
@@ -516,7 +516,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportPost(REPORTER_ID.toString(), POST_PUBLIC_ID, {
-          reasonDetail: 'Nội dung vi phạm',
+          reasonCode: 'violence_hate',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
@@ -533,7 +533,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportPost(REPORTER_ID.toString(), POST_PUBLIC_ID, {
-          reasonDetail: 'Nội dung vi phạm',
+          reasonCode: 'violence_hate',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
 
@@ -551,7 +551,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportPost(REPORTER_ID.toString(), POST_PUBLIC_ID, {
-          reasonDetail: 'Nội dung vi phạm',
+          reasonCode: 'violence_hate',
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
 
@@ -569,7 +569,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportPost(REPORTER_ID.toString(), POST_PUBLIC_ID, {
-          reasonDetail: 'Nội dung vi phạm',
+          reasonCode: 'violence_hate',
         }),
       ).rejects.toBeInstanceOf(ConflictException);
 
@@ -592,8 +592,7 @@ describe('ReportsService', () => {
         REPORTER_ID.toString(),
         POST_PUBLIC_ID,
         {
-          reasonGroup: ReportReasonGroup.INAPPROPRIATE_CONTENT,
-          reasonDetail: 'Nội dung không phù hợp',
+          reasonCode: 'nudity_sexual',
           description: 'Mô tả bổ sung',
         },
         '203.0.113.10',
@@ -614,8 +613,10 @@ describe('ReportsService', () => {
             reporterId: REPORTER_ID,
             targetType: ReportTargetType.POST,
             targetId: POST_ID,
+            reasonCode: 'nudity_sexual',
+            reasonTaxonomyVersion: 1,
             reasonGroup: ReportReasonGroup.INAPPROPRIATE_CONTENT,
-            reasonDetail: 'Nội dung không phù hợp',
+            reasonDetail: 'Khỏa thân hoặc hoạt động tình dục',
             description: 'Mô tả bổ sung',
             targetSnapshot: {
               publicId: POST_PUBLIC_ID,
@@ -664,7 +665,7 @@ describe('ReportsService', () => {
 
       await expect(
         service.reportUser(REPORTER_ID.toString(), 'invalid-user', {
-          reasonDetail: 'Tài khoản giả mạo',
+          reasonCode: 'me',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
 
@@ -687,7 +688,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportUser(REPORTER_ID.toString(), REPORTER_PUBLIC_ID, {
-          reasonDetail: 'Tài khoản giả mạo',
+          reasonCode: 'me',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
@@ -703,7 +704,7 @@ describe('ReportsService', () => {
 
       await expect(
         context.service.reportUser(REPORTER_ID.toString(), TARGET_PUBLIC_ID, {
-          reasonDetail: 'Tài khoản giả mạo',
+          reasonCode: 'me',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
 
@@ -712,7 +713,7 @@ describe('ReportsService', () => {
       ).not.toHaveBeenCalled();
     });
 
-    it('creates a user report with a target snapshot', async () => {
+    it('creates a canonical account-content report with a target snapshot', async () => {
       const context = createContext();
 
       arrangeUserReportAccess(context);
@@ -725,9 +726,8 @@ describe('ReportsService', () => {
         REPORTER_ID.toString(),
         TARGET_PUBLIC_ID,
         {
-          reasonGroup: ReportReasonGroup.IMPERSONATION,
-          reasonDetail: 'Tài khoản giả mạo',
-          description: 'Dùng tên và ảnh của người khác',
+          reasonCode: 'violence_hate',
+          description: 'Tài khoản có nội dung kích động bạo lực',
         },
         '203.0.113.10',
       );
@@ -738,9 +738,11 @@ describe('ReportsService', () => {
             reporterId: REPORTER_ID,
             targetType: ReportTargetType.USER,
             targetId: TARGET_USER_ID,
-            reasonGroup: ReportReasonGroup.IMPERSONATION,
-            reasonDetail: 'Tài khoản giả mạo',
-            description: 'Dùng tên và ảnh của người khác',
+            reasonCode: 'violence_hate',
+            reasonTaxonomyVersion: 1,
+            reasonGroup: ReportReasonGroup.INAPPROPRIATE_CONTENT,
+            reasonDetail: 'Bạo lực hoặc thù ghét',
+            description: 'Tài khoản có nội dung kích động bạo lực',
             targetSnapshot: {
               publicId: TARGET_PUBLIC_ID,
               username: 'target_user',
@@ -801,7 +803,7 @@ describe('ReportsService', () => {
         REPORTER_ID.toString(),
         TARGET_PUBLIC_ID,
         {
-          reasonDetail: 'Tài khoản giả mạo',
+          reasonCode: 'me',
         },
       );
 

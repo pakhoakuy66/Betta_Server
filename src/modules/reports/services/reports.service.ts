@@ -9,6 +9,12 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { ModerationReasonTarget } from '../../../common/moderation/moderation-reason.constants';
+import {
+  type CanonicalReportSubmissionReason,
+  normalizeModerationReasonDetail,
+  resolveReportSubmissionReason,
+} from '../../../common/moderation/moderation-reason.policy';
 import { InjectModel } from '@nestjs/mongoose';
 import {
   Connection,
@@ -29,7 +35,6 @@ import { Block } from '../../relationshipModule/schemas/block.schema';
 import { ReportCooldown } from '../schemas/report-cooldown.schema';
 import {
   Report,
-  ReportReasonGroup,
   ReportStatus,
   ReportTargetType,
 } from '../schemas/report.schema';
@@ -272,6 +277,14 @@ export class ReportsService {
     clientIp?: string,
   ): Promise<ReportSubmissionResponse> {
     const reporterObjectId = this.toObjectId(userId);
+    const reason = resolveReportSubmissionReason({
+      target: ModerationReasonTarget.REPORT_POST,
+      reasonCode: dto.reasonCode,
+      legacyReasonGroup: dto.reasonGroup,
+      legacyReasonDetail: dto.reasonDetail,
+    });
+    const description = this.normalizeReportDescription(dto.description);
+    if (!reason) throw new BadRequestException('Lý do báo cáo không hợp lệ');
 
     if (!isValidPostPublicId(publicId)) {
       throw new NotFoundException('Bài viết không tồn tại hoặc đã hết hạn');
@@ -377,7 +390,8 @@ export class ReportsService {
         reporterId: reporterObjectId,
         post,
         author,
-        dto,
+        reason,
+        description,
       });
 
       await this.attachReportToCooldown({
@@ -405,6 +419,14 @@ export class ReportsService {
     clientIp?: string,
   ): Promise<ReportSubmissionResponse> {
     const reporterObjectId = this.toObjectId(userId);
+    const reason = resolveReportSubmissionReason({
+      target: ModerationReasonTarget.REPORT_USER,
+      reasonCode: dto.reasonCode,
+      legacyReasonGroup: dto.reasonGroup,
+      legacyReasonDetail: dto.reasonDetail,
+    });
+    const description = this.normalizeReportDescription(dto.description);
+    if (!reason) throw new BadRequestException('Lý do báo cáo không hợp lệ');
 
     if (!this.isValidUserPublicId(publicId)) {
       throw new NotFoundException('Người dùng không tồn tại');
@@ -480,7 +502,8 @@ export class ReportsService {
         session,
         reporterId: reporterObjectId,
         targetUser,
-        dto,
+        reason,
+        description,
       });
 
       await this.attachReportToCooldown({
@@ -682,13 +705,15 @@ export class ReportsService {
     reporterId,
     post,
     author,
-    dto,
+    reason,
+    description,
   }: {
     session: ClientSession;
     reporterId: Types.ObjectId;
     post: ReportablePost;
     author: ReportAuthor;
-    dto: ReportPostDto;
+    reason: CanonicalReportSubmissionReason;
+    description: string;
   }): Promise<CreatedReportDocument> {
     await this.acquireReportCooldown({
       session,
@@ -705,9 +730,11 @@ export class ReportsService {
           reporterId,
           targetType: ReportTargetType.POST,
           targetId: post._id,
-          reasonGroup: dto.reasonGroup ?? ReportReasonGroup.VIOLATION_CONTENT,
-          reasonDetail: dto.reasonDetail,
-          description: dto.description ?? '',
+          reasonCode: reason.code,
+          reasonTaxonomyVersion: reason.taxonomyVersion,
+          reasonGroup: reason.group,
+          reasonDetail: reason.label,
+          description,
           targetSnapshot: {
             publicId: post.publicId,
             authorId: post.authorId,
@@ -729,12 +756,14 @@ export class ReportsService {
     session,
     reporterId,
     targetUser,
-    dto,
+    reason,
+    description,
   }: {
     session: ClientSession;
     reporterId: Types.ObjectId;
     targetUser: ReportableUser;
-    dto: ReportUserDto;
+    reason: CanonicalReportSubmissionReason;
+    description: string;
   }): Promise<CreatedReportDocument> {
     await this.acquireReportCooldown({
       session,
@@ -751,9 +780,11 @@ export class ReportsService {
           reporterId,
           targetType: ReportTargetType.USER,
           targetId: targetUser._id,
-          reasonGroup: dto.reasonGroup ?? ReportReasonGroup.IMPERSONATION,
-          reasonDetail: dto.reasonDetail,
-          description: dto.description ?? '',
+          reasonCode: reason.code,
+          reasonTaxonomyVersion: reason.taxonomyVersion,
+          reasonGroup: reason.group,
+          reasonDetail: reason.label,
+          description,
           targetSnapshot: {
             publicId: targetUser.publicId,
             username: targetUser.username,
@@ -768,6 +799,15 @@ export class ReportsService {
     );
 
     return report as CreatedReportDocument;
+  }
+
+  private normalizeReportDescription(value: string | undefined): string {
+    if (value === undefined || value.trim() === '') return '';
+    const normalized = normalizeModerationReasonDetail(value, 1, 1000);
+    if (!normalized) {
+      throw new BadRequestException('Mô tả báo cáo không hợp lệ');
+    }
+    return normalized;
   }
 
   private async acquireReportCooldown({

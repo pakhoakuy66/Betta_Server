@@ -1,42 +1,41 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import {
-  IsEnum,
-  IsOptional,
-  IsString,
-  MaxLength,
-  MinLength,
-} from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { REPORT_POST_REASON_CODES } from '../../../common/moderation/moderation-reason.constants';
 import { ReportReasonGroup } from '../schemas/report.schema';
 
-const trimStringValue = ({ value }: { value: unknown }): unknown => {
-  return typeof value === 'string' ? value.trim() : value;
-};
+const trimStringValue = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim() : value;
 
 export class ReportPostDto {
   @ApiPropertyOptional({
-    enum: ReportReasonGroup,
-    example: ReportReasonGroup.VIOLATION_CONTENT,
-    description: 'Nhóm lý do báo cáo. Nếu không gửi, backend dùng mặc định.',
-  })
-  @IsOptional()
-  @IsEnum(ReportReasonGroup, { message: 'Nhóm lý do báo cáo không hợp lệ' })
-  reasonGroup?: ReportReasonGroup;
-
-  @ApiProperty({
-    example: 'Nội dung nhạy cảm hoặc gây hại',
-    description: 'Lý do báo cáo bài viết',
+    enum: REPORT_POST_REASON_CODES,
+    description: 'Canonical reason code. Ưu tiên field này cho mọi Client mới.',
   })
   @Transform(trimStringValue)
+  @IsOptional()
   @IsString()
-  @MinLength(2, { message: 'Lý do báo cáo phải có ít nhất 2 ký tự' })
-  @MaxLength(200, { message: 'Lý do báo cáo không được vượt quá 200 ký tự' })
-  reasonDetail!: string;
+  @IsIn(REPORT_POST_REASON_CODES)
+  reasonCode?: string;
 
   @ApiPropertyOptional({
-    example: 'Bài viết có nội dung công kích cá nhân.',
-    description: 'Mô tả bổ sung của người báo cáo',
+    enum: ReportReasonGroup,
+    deprecated: true,
+    description:
+      'Compatibility field cho Client cũ; chỉ chấp nhận cùng nhãn SRS allowlist.',
   })
+  @IsOptional()
+  @IsIn(Object.values(ReportReasonGroup))
+  reasonGroup?: ReportReasonGroup;
+
+  @ApiPropertyOptional({ deprecated: true, maxLength: 200 })
+  @Transform(trimStringValue)
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  reasonDetail?: string;
+
+  @ApiPropertyOptional({ maxLength: 1000 })
   @Transform(trimStringValue)
   @IsOptional()
   @IsString()

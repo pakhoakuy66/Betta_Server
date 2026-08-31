@@ -13,16 +13,12 @@ import {
   MinLength,
   ValidateIf,
 } from 'class-validator';
-import {
-  USER_RESTRICTION_PUBLIC_REASON_PATTERN,
-  UserRestrictionType,
-} from '../../users/constants/user-moderation.constants';
-import {
-  ADMIN_LIFECYCLE_CORRELATION_ID_PATTERN,
-  ADMIN_LIFECYCLE_REASON_CODE_PATTERN,
-} from '../constants/admin-lifecycle.constants';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
+import { ADMIN_LIFECYCLE_CORRELATION_ID_PATTERN } from '../constants/admin-lifecycle.constants';
 import {
   ADMIN_USER_RESTRICTION_OPERATIONS,
+  ADMIN_USER_RESTRICTION_PUBLIC_REASON_CODES,
+  ADMIN_USER_RESTRICTION_REASON_CODES,
   ADMIN_USER_RESTRICTION_REASON_NOTE_MAX_LENGTH,
   ADMIN_USER_RESTRICTION_REASON_NOTE_MIN_LENGTH,
   ADMIN_USER_RESTRICTION_TYPES,
@@ -58,22 +54,20 @@ export class UpdateAdminUserRestrictionDto {
   @IsISO8601({ strict: true, strictSeparator: true })
   expiresAt?: string;
 
-  @ApiPropertyOptional({
-    pattern: USER_RESTRICTION_PUBLIC_REASON_PATTERN.source,
-  })
+  @ApiPropertyOptional({ enum: ADMIN_USER_RESTRICTION_PUBLIC_REASON_CODES })
   @ValidateIf(
     (dto: UpdateAdminUserRestrictionDto) =>
       dto.operation === AdminUserRestrictionOperation.APPLY,
   )
   @Transform(trim)
   @IsString()
-  @Matches(USER_RESTRICTION_PUBLIC_REASON_PATTERN)
+  @IsIn(ADMIN_USER_RESTRICTION_PUBLIC_REASON_CODES)
   publicReasonCode?: string;
 
-  @ApiProperty({ pattern: ADMIN_LIFECYCLE_REASON_CODE_PATTERN.source })
+  @ApiProperty({ enum: ADMIN_USER_RESTRICTION_REASON_CODES })
   @Transform(trim)
   @IsString()
-  @Matches(ADMIN_LIFECYCLE_REASON_CODE_PATTERN)
+  @IsIn(ADMIN_USER_RESTRICTION_REASON_CODES)
   reasonCode!: string;
 
   @ApiProperty({

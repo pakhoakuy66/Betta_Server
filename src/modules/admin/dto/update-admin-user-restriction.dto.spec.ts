@@ -19,7 +19,7 @@ describe('UpdateAdminUserRestrictionDto', () => {
         restrictionType: UserRestrictionType.TEMPORARY_SUSPENSION,
         expectedVersion: 2,
         expiresAt: '2026-08-18T00:00:00.000Z',
-        publicReasonCode: 'policy_violation',
+        publicReasonCode: 'community_policy_review',
         reasonCode: 'moderation_policy',
         reasonNote: 'Reviewed by moderation operator',
         correlationId: 'moderation-20260817-0001',

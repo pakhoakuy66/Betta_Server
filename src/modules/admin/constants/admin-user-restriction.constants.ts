@@ -1,3 +1,7 @@
+import {
+  CanonicalModerationReasonCode,
+  PublicModerationReasonCode,
+} from '../../../common/moderation/moderation-reason.constants';
 import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 import {
   AdminPermission,
@@ -15,6 +19,15 @@ export const ADMIN_USER_RESTRICTION_OPERATIONS = Object.freeze(
 export const ADMIN_USER_RESTRICTION_TYPES = Object.freeze(
   Object.values(UserRestrictionType),
 );
+export const ADMIN_USER_RESTRICTION_REASON_CODES = Object.freeze([
+  CanonicalModerationReasonCode.MODERATION_POLICY,
+  CanonicalModerationReasonCode.SEVERE_POLICY_VIOLATION,
+  CanonicalModerationReasonCode.MODERATION_REVIEW_COMPLETED,
+]);
+export const ADMIN_USER_RESTRICTION_PUBLIC_REASON_CODES = Object.freeze([
+  PublicModerationReasonCode.COMMUNITY_POLICY_REVIEW,
+  PublicModerationReasonCode.SEVERE_POLICY_VIOLATION,
+]);
 export const ADMIN_USER_RESTRICTION_REASON_NOTE_MIN_LENGTH = 3 as const;
 export const ADMIN_USER_RESTRICTION_REASON_NOTE_MAX_LENGTH = 500 as const;
 export const ADMIN_USER_RESTRICTION_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;

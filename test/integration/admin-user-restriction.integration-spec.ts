@@ -348,7 +348,10 @@ describe('Admin User restriction MongoDB integration', () => {
     const replay = await service.updateRestriction(input);
     expect(replay).toEqual(first);
     await expect(
-      service.updateRestriction({ ...input, reasonCode: 'different_reason' }),
+      service.updateRestriction({
+        ...input,
+        reasonNote: 'Reviewed different evidence under the moderation policy',
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(await requests.countDocuments({})).toBe(1);
     expect(

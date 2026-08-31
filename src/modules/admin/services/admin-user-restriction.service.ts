@@ -17,15 +17,20 @@ import {
   Types,
 } from 'mongoose';
 import { OutboxService } from '../../../common/outbox/outbox.service';
+import {
+  ModerationReasonAction,
+  ModerationReasonTarget,
+} from '../../../common/moderation/moderation-reason.constants';
+import {
+  getCanonicalModerationReason,
+  normalizeModerationReasonDetail,
+} from '../../../common/moderation/moderation-reason.policy';
 import { isMongoInfrastructureError } from '../../../common/utils/is-mongo-infrastructure-error';
 import {
   AuthSession,
   SessionRevokeReason,
 } from '../../auth/schemas/auth-session.schema';
-import {
-  USER_RESTRICTION_PUBLIC_REASON_PATTERN,
-  UserRestrictionType,
-} from '../../users/constants/user-moderation.constants';
+import { UserRestrictionType } from '../../users/constants/user-moderation.constants';
 import {
   USER_STATUS,
   User,
@@ -55,7 +60,6 @@ import {
 import {
   ADMIN_LIFECYCLE_CORRELATION_ID_PATTERN,
   ADMIN_LIFECYCLE_IDEMPOTENCY_KEY_PATTERN,
-  ADMIN_LIFECYCLE_REASON_CODE_PATTERN,
 } from '../constants/admin-lifecycle.constants';
 import {
   hasAdminPermission,
@@ -303,19 +307,37 @@ export class AdminUserRestrictionService {
     this.assertActor(input.actor, permission);
 
     const reasonCode = input.reasonCode?.trim();
-    const reasonNote = input.reasonNote?.trim();
+    const reasonNote = normalizeModerationReasonDetail(
+      input.reasonNote,
+      ADMIN_USER_RESTRICTION_REASON_NOTE_MIN_LENGTH,
+      ADMIN_USER_RESTRICTION_REASON_NOTE_MAX_LENGTH,
+    );
     const publicReasonCode = input.publicReasonCode?.trim();
     const correlationId = input.correlationId?.trim();
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : undefined;
+    const reasonAction =
+      input.operation === AdminUserRestrictionOperation.APPLY
+        ? input.restrictionType === UserRestrictionType.TEMPORARY_SUSPENSION
+          ? ModerationReasonAction.APPLY_TEMPORARY_SUSPENSION
+          : ModerationReasonAction.APPLY_INDEFINITE_BAN
+        : input.restrictionType === UserRestrictionType.TEMPORARY_SUSPENSION
+          ? ModerationReasonAction.REMOVE_TEMPORARY_SUSPENSION
+          : ModerationReasonAction.REMOVE_INDEFINITE_BAN;
+    const canonicalReason = getCanonicalModerationReason(
+      ModerationReasonTarget.USER_RESTRICTION,
+      reasonAction,
+      reasonCode,
+    );
+    const canonicalPublicReasonCode: string | null | undefined =
+      canonicalReason?.publicReasonCode;
 
     if (
       !isValidAdminUserPublicId(input.targetPublicId) ||
       !Number.isSafeInteger(input.expectedVersion) ||
       input.expectedVersion < 0 ||
       !ADMIN_LIFECYCLE_IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey) ||
-      !ADMIN_LIFECYCLE_REASON_CODE_PATTERN.test(reasonCode) ||
-      reasonNote.length < ADMIN_USER_RESTRICTION_REASON_NOTE_MIN_LENGTH ||
-      reasonNote.length > ADMIN_USER_RESTRICTION_REASON_NOTE_MAX_LENGTH ||
+      !canonicalReason ||
+      !reasonNote ||
       (correlationId !== undefined &&
         !ADMIN_LIFECYCLE_CORRELATION_ID_PATTERN.test(correlationId))
     ) {
@@ -325,10 +347,7 @@ export class AdminUserRestrictionService {
     }
 
     if (input.operation === AdminUserRestrictionOperation.APPLY) {
-      if (
-        !publicReasonCode ||
-        !USER_RESTRICTION_PUBLIC_REASON_PATTERN.test(publicReasonCode)
-      ) {
+      if (!publicReasonCode || canonicalPublicReasonCode !== publicReasonCode) {
         throw new BadRequestException('Public restriction reason không hợp lệ');
       }
       if (input.restrictionType === UserRestrictionType.TEMPORARY_SUSPENSION) {
@@ -353,7 +372,7 @@ export class AdminUserRestrictionService {
       ...input,
       expiresAt,
       publicReasonCode,
-      reasonCode,
+      reasonCode: canonicalReason.code,
       reasonNote,
       correlationId,
     });
