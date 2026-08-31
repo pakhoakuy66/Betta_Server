@@ -246,6 +246,42 @@ describe('AdminAuditService', () => {
     ).rejects.toThrow('actor AdminAccount không hợp lệ');
   });
 
+  it('stores assignment ownership changes in allowlisted metadata', async () => {
+    const { service, insertMany } = createContext();
+    await service.record(
+      validInput({
+        action: AdminAuditAction.REPORT_REASSIGNED,
+        actor: {
+          type: AdminAuditActorType.ADMIN_ACCOUNT,
+          publicId: 'adm_23456789ABCD',
+          username: 'owner',
+          displayName: 'Owner',
+          role: AdminRole.SUPER_ADMIN,
+          permission: AdminPermission.REPORTS_REVIEW,
+          permissionVersion: 1,
+        },
+        target: {
+          type: AdminAuditTargetType.REPORT,
+          publicId: 'rpt_23456789ABCDEFGH',
+        },
+        metadata: {
+          beforeVersion: 1,
+          afterVersion: 2,
+          beforeState: 'reviewing',
+          afterState: 'reviewing',
+          beforeAssigneePublicId: 'adm_23456789ABCE',
+          afterAssigneePublicId: 'adm_23456789ABCF',
+        },
+      }),
+    );
+
+    expect(insertMany.mock.calls[0]?.[0][0]?.metadata).toEqual(
+      expect.objectContaining({
+        beforeAssigneePublicId: 'adm_23456789ABCE',
+        afterAssigneePublicId: 'adm_23456789ABCF',
+      }),
+    );
+  });
   it('rejects unknown metadata and secret-bearing reason notes', async () => {
     const { service } = createContext();
     await expect(

@@ -136,6 +136,20 @@ export class AdminAuditMetadata {
     immutable: true,
   })
   affectedSessionCount?: number;
+
+  @Prop({
+    type: String,
+    match: ADMIN_AUDIT_ENTITY_PUBLIC_ID_PATTERN,
+    immutable: true,
+  })
+  beforeAssigneePublicId?: string;
+
+  @Prop({
+    type: String,
+    match: ADMIN_AUDIT_ENTITY_PUBLIC_ID_PATTERN,
+    immutable: true,
+  })
+  afterAssigneePublicId?: string;
 }
 
 const ActorSchema = SchemaFactory.createForClass(AdminAuditActor);

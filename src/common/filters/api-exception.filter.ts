@@ -11,6 +11,11 @@ import {
   ACCOUNT_RESTRICTED_ERROR,
   normalizePublicAccountRestriction,
 } from '../security/public-account-restriction';
+import {
+  normalizePublicReportAssignmentConflict,
+  REPORT_ASSIGNMENT_CONFLICT_ERROR,
+  REPORT_ASSIGNMENT_IDEMPOTENCY_CONFLICT_ERROR,
+} from '../security/public-report-assignment-conflict';
 
 const BAD_REQUEST_STATUS = 400;
 const NOT_FOUND_STATUS = 404;
@@ -132,6 +137,13 @@ export class ApiExceptionFilter implements ExceptionFilter {
       statusCode === 428 && body.error === 'ACCESS_SUPPORT_CHALLENGE_REQUIRED'
         ? normalizeChallenge(body.challenge)
         : undefined;
+    const currentAssignment =
+      statusCode === 409 && body.error === REPORT_ASSIGNMENT_CONFLICT_ERROR
+        ? normalizePublicReportAssignmentConflict(body.currentAssignment)
+        : undefined;
+    const idempotencyConflict =
+      statusCode === 409 &&
+      body.error === REPORT_ASSIGNMENT_IDEMPOTENCY_CONFLICT_ERROR;
 
     const path = getPathname(request);
 
@@ -164,13 +176,18 @@ export class ApiExceptionFilter implements ExceptionFilter {
           ? ACCOUNT_RESTRICTED_ERROR
           : challenge
             ? 'ACCESS_SUPPORT_CHALLENGE_REQUIRED'
-            : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
+            : currentAssignment
+              ? REPORT_ASSIGNMENT_CONFLICT_ERROR
+              : idempotencyConflict
+                ? REPORT_ASSIGNMENT_IDEMPOTENCY_CONFLICT_ERROR
+                : (ERROR_CODES[statusCode] ?? 'HTTP_ERROR'),
       message,
       timestamp: new Date().toISOString(),
       path,
       ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       ...(publicRestriction ? { publicRestriction } : {}),
       ...(challenge ? { challenge } : {}),
+      ...(currentAssignment ? { currentAssignment } : {}),
     };
 
     if (statusCode >= INTERNAL_SERVER_ERROR_STATUS) {

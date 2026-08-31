@@ -202,4 +202,111 @@ describe('ApiExceptionFilter', () => {
       'policy_violation',
     );
   });
+
+  it('chỉ trả safe current assignment cho conflict ADM-MOD-02', () => {
+    const { host, response } = createHost(
+      '/api/v1/admin/reports/rpt_1234567890/assignment',
+    );
+    const filter = new ApiExceptionFilter();
+
+    filter.catch(
+      new HttpException(
+        {
+          error: 'REPORT_ASSIGNMENT_CONFLICT',
+          message: 'Report đã được cập nhật bởi yêu cầu khác',
+          currentAssignment: {
+            publicId: 'rpt_1234567890',
+            kind: 'REPORT',
+            status: 'REVIEWING',
+            assignee: {
+              publicId: 'adm_1234567890',
+              assignedAt: '2026-08-24T08:00:00.000Z',
+            },
+            version: 4,
+          },
+        },
+        HttpStatus.CONFLICT,
+      ),
+      host,
+    );
+
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 409,
+        error: 'REPORT_ASSIGNMENT_CONFLICT',
+        currentAssignment: {
+          publicId: 'rpt_1234567890',
+          kind: 'REPORT',
+          status: 'REVIEWING',
+          assignee: {
+            publicId: 'adm_1234567890',
+            assignedAt: '2026-08-24T08:00:00.000Z',
+          },
+          version: 4,
+        },
+      }),
+    );
+  });
+
+  it('loại bỏ assignment snapshot nếu có field nội bộ', () => {
+    const { host, response } = createHost();
+    const filter = new ApiExceptionFilter();
+
+    filter.catch(
+      new HttpException(
+        {
+          error: 'REPORT_ASSIGNMENT_CONFLICT',
+          message: 'Conflict',
+          currentAssignment: {
+            publicId: 'rpt_1234567890',
+            kind: 'REPORT',
+            status: 'REVIEWING',
+            assignee: {
+              publicId: 'adm_1234567890',
+              assignedAt: '2026-08-24T08:00:00.000Z',
+            },
+            version: 4,
+            targetReportId: 'internal-object-id',
+          },
+        },
+        HttpStatus.CONFLICT,
+      ),
+      host,
+    );
+
+    const payload = response.json.mock.calls[0][0];
+    expect(payload).toEqual(
+      expect.objectContaining({
+        error: 'CONFLICT',
+        message: 'Conflict',
+      }),
+    );
+    expect(payload).not.toHaveProperty('currentAssignment');
+    expect(JSON.stringify(payload)).not.toContain('internal-object-id');
+  });
+
+  it('giữ stable code cho idempotency conflict và không thêm state', () => {
+    const { host, response } = createHost();
+    const filter = new ApiExceptionFilter();
+
+    filter.catch(
+      new HttpException(
+        {
+          error: 'REPORT_ASSIGNMENT_IDEMPOTENCY_CONFLICT',
+          message: 'Idempotency-Key đã được dùng cho payload khác',
+        },
+        HttpStatus.CONFLICT,
+      ),
+      host,
+    );
+
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'REPORT_ASSIGNMENT_IDEMPOTENCY_CONFLICT',
+      }),
+    );
+    expect(response.json.mock.calls[0][0]).not.toHaveProperty(
+      'currentAssignment',
+    );
+  });
 });

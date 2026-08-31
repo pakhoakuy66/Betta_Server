@@ -31,6 +31,8 @@ export type AdminAuditMetadataInput = Readonly<{
   beforeState?: string;
   afterState?: string;
   affectedSessionCount?: number;
+  beforeAssigneePublicId?: string;
+  afterAssigneePublicId?: string;
 }>;
 
 export type RecordAdminAuditInput = Readonly<{

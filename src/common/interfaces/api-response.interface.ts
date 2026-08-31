@@ -1,3 +1,5 @@
+import type { PublicAccountRestriction } from '../security/public-account-restriction';
+import type { PublicReportAssignmentConflictState } from '../security/public-report-assignment-conflict';
 export interface ApiSuccessResponse<T = unknown> {
   success: true;
   data: T | null;
@@ -15,6 +17,7 @@ export interface ApiErrorResponse {
   path: string;
   retryAfterSeconds?: number;
   publicRestriction?: PublicAccountRestriction;
+  currentAssignment?: PublicReportAssignmentConflictState;
   challenge?: {
     token: string;
     difficultyBits: number;
@@ -30,4 +33,3 @@ export const createSuccessResponse = <T>(
   ...(message ? { message } : {}),
   data,
 });
-import type { PublicAccountRestriction } from '../security/public-account-restriction';
