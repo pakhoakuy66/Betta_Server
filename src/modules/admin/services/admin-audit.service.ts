@@ -38,6 +38,12 @@ const DAY_MS = 86_400_000;
 const STATE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 const SENSITIVE_NOTE_PATTERN =
   /authorization|bearer|cookie|mật khẩu|password|otp|refresh.?token|access.?token|secret|recovery.?code/i;
+const RAW_CONTACT_PATTERN =
+  /(?:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})|(?:\+\d{8,15}\b)|(?:\b\d{3}[- .]\d{3}[- .]\d{4}\b)/i;
+const TOKEN_VALUE_PATTERN =
+  /(?:\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b)|(?:\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b)/i;
+const EVIDENCE_MATERIAL_PATTERN =
+  /(?:https?:\/\/)|(?:data:image\/)|(?:res\.cloudinary\.com)/i;
 
 const ACTION_TARGET_TYPE: Readonly<
   Record<AdminAuditAction, AdminAuditTargetType>
@@ -93,7 +99,7 @@ const ACTION_TARGET_TYPE: Readonly<
   [AdminAuditAction.SPONSORED_EXPIRED]: AdminAuditTargetType.SPONSORED_POST,
   [AdminAuditAction.SPONSORED_PAUSED]: AdminAuditTargetType.SPONSORED_POST,
   [AdminAuditAction.SPONSORED_RESUMED]: AdminAuditTargetType.SPONSORED_POST,
-  [AdminAuditAction.CONTACT_REVEALED]: AdminAuditTargetType.REPORT,
+  [AdminAuditAction.CONTACT_REVEALED]: AdminAuditTargetType.SYSTEM_REPORT,
   [AdminAuditAction.SECURITY_REQUEST_DENIED]:
     AdminAuditTargetType.SECURITY_CONTROL,
   [AdminAuditAction.AUDIT_LOG_ACCESSED]: AdminAuditTargetType.AUDIT_LOG,
@@ -383,6 +389,8 @@ export class AdminAuditService {
       'beforeState',
       'afterState',
       'affectedSessionCount',
+      'beforeAssigneePublicId',
+      'afterAssigneePublicId',
     ]);
     for (const key of Object.keys(metadata)) {
       if (!allowed.has(key)) {
@@ -412,6 +420,18 @@ export class AdminAuditService {
           throw new TypeError(`Admin audit metadata ${key} không hợp lệ`);
         }
         normalized[key] = state;
+      }
+    }
+    for (const key of [
+      'beforeAssigneePublicId',
+      'afterAssigneePublicId',
+    ] as const) {
+      const value = metadata[key];
+      if (value !== undefined) {
+        if (!isValidAdminPublicId(value)) {
+          throw new TypeError(`Admin audit metadata ${key} không hợp lệ`);
+        }
+        normalized[key] = value;
       }
     }
     return Object.keys(normalized).length ? normalized : undefined;
@@ -526,6 +546,16 @@ export class AdminAuditService {
                 affectedSessionCount: record.metadata.affectedSessionCount,
               }
             : {}),
+          ...(record.metadata.beforeAssigneePublicId !== undefined
+            ? {
+                beforeAssigneePublicId: record.metadata.beforeAssigneePublicId,
+              }
+            : {}),
+          ...(record.metadata.afterAssigneePublicId !== undefined
+            ? {
+                afterAssigneePublicId: record.metadata.afterAssigneePublicId,
+              }
+            : {}),
         })
       : undefined;
 
@@ -569,7 +599,13 @@ export class AdminAuditService {
   ): string | undefined {
     if (value === undefined) return undefined;
     const normalized = this.normalizeRequiredText(value, max, field);
-    if (rejectSensitive && SENSITIVE_NOTE_PATTERN.test(normalized)) {
+    if (
+      rejectSensitive &&
+      (SENSITIVE_NOTE_PATTERN.test(normalized) ||
+        RAW_CONTACT_PATTERN.test(normalized) ||
+        TOKEN_VALUE_PATTERN.test(normalized) ||
+        EVIDENCE_MATERIAL_PATTERN.test(normalized))
+    ) {
       throw new TypeError(`Admin audit ${field} chứa dữ liệu bị cấm`);
     }
     return normalized;

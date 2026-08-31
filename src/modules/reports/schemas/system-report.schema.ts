@@ -1,5 +1,24 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  ADMIN_SYSTEM_REPORT_QUEUE_ASSIGNEE_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_CREATED_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_DECISION_SLA_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_FILTERED_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_TRIAGE_SLA_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_DECISION_SORT_INDEX,
+  ADMIN_SYSTEM_REPORT_QUEUE_TRIAGE_SORT_INDEX,
+  buildReportQueueMetadata,
+  ReportQueuePriority,
+} from '../constants/report-queue.constants';
+import { generateSystemReportPublicId } from '../utils/generate-system-report-public-id';
+import {
+  ReportRetentionHold,
+  ReportRetentionHoldSchema,
+  RetentionCleanupStatus,
+} from './report-retention.schema';
+
+export { RetentionCleanupStatus } from './report-retention.schema';
 
 export enum SystemReportStatus {
   PENDING = 'pending',
@@ -16,13 +35,6 @@ export enum SystemReportSource {
 export enum SystemReportType {
   SYSTEM_ISSUE = 'SYSTEM_ISSUE',
   ACCOUNT_ACCESS = 'ACCOUNT_ACCESS',
-}
-
-export enum RetentionCleanupStatus {
-  PENDING = 'pending',
-  PROCESSING = 'processing',
-  FAILED = 'failed',
-  MANUAL_REVIEW = 'manual_review',
 }
 
 @Schema({ _id: false })
@@ -68,6 +80,9 @@ export class SystemReport extends Document {
   @Prop({ type: String, default: null, select: false })
   encryptedContactEmail!: string | null;
 
+  @Prop({ type: String, default: null, maxlength: 320 })
+  contactEmailMasked!: string | null;
+
   @Prop({ type: String, default: null, select: false })
   contactLookupHmac!: string | null;
 
@@ -82,6 +97,25 @@ export class SystemReport extends Document {
 
   @Prop({ type: Number, default: 0, min: 0 })
   version!: number;
+
+  @Prop({
+    type: String,
+    enum: Object.values(ReportQueuePriority),
+    default: ReportQueuePriority.STANDARD,
+  })
+  priority!: ReportQueuePriority;
+
+  @Prop({ type: String, default: null })
+  assigneePublicId!: string | null;
+
+  @Prop({ type: Date, default: null })
+  assignedAt!: Date | null;
+
+  @Prop({ type: Date, default: null })
+  triageDueAt!: Date | null;
+
+  @Prop({ type: Date, default: null })
+  decisionDueAt!: Date | null;
 
   @Prop({ type: String, required: true, trim: true, maxlength: 2000 })
   description!: string;
@@ -122,14 +156,45 @@ export class SystemReport extends Document {
   @Prop({ type: String, default: null })
   retentionLockToken!: string | null;
 
+  /**
+   * Point-of-no-return fence cho Cloudinary deletion. Worker không được
+   * reclaim một lease đã đi qua mốc này; trạng thái mơ hồ phải manual review.
+   */
+  @Prop({ type: Date, default: null, select: false })
+  retentionDestructiveStartedAt!: Date | null;
+
   @Prop({ type: Number, default: 0, min: 0 })
   retentionAttempts!: number;
 
   @Prop({ type: String, default: '', maxlength: 2000 })
   retentionLastError!: string;
+
+  @Prop({ type: Date, default: null })
+  evidencePurgedAt!: Date | null;
+
+  @Prop({ type: Boolean, default: false })
+  evidenceUnavailable!: boolean;
+
+  @Prop({
+    type: ReportRetentionHoldSchema,
+    default: null,
+    select: false,
+  })
+  retentionHold!: ReportRetentionHold | null;
+
+  createdAt!: Date;
+  updatedAt!: Date;
 }
 
 export const SystemReportSchema = SchemaFactory.createForClass(SystemReport);
+
+SystemReportSchema.pre('validate', function () {
+  const createdAt = this.createdAt ?? new Date();
+  const metadata = buildReportQueueMetadata(createdAt, this.priority);
+  this.publicId ??= generateSystemReportPublicId();
+  this.triageDueAt ??= metadata.triageDueAt;
+  this.decisionDueAt ??= metadata.decisionDueAt;
+});
 
 SystemReportSchema.index(
   { dedupeKey: 1 },
@@ -166,6 +231,42 @@ SystemReportSchema.index({ status: 1, terminalAt: 1 });
 SystemReportSchema.index({
   retentionCleanupStatus: 1,
   retentionLockedUntil: 1,
+  retentionDestructiveStartedAt: 1,
   retentionAttempts: 1,
   terminalAt: 1,
 });
+SystemReportSchema.index({
+  'retentionHold.expiresAt': 1,
+  terminalAt: 1,
+  evidencePurgedAt: 1,
+});
+
+SystemReportSchema.index(
+  { createdAt: -1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_CREATED_INDEX },
+);
+SystemReportSchema.index(
+  { status: 1, reportType: 1, priority: 1, createdAt: -1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_FILTERED_INDEX },
+);
+SystemReportSchema.index(
+  { assigneePublicId: 1, status: 1, createdAt: -1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_ASSIGNEE_INDEX },
+);
+SystemReportSchema.index(
+  { triageDueAt: 1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_TRIAGE_SORT_INDEX },
+);
+
+SystemReportSchema.index(
+  { decisionDueAt: 1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_DECISION_SORT_INDEX },
+);
+SystemReportSchema.index(
+  { status: 1, triageDueAt: 1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_TRIAGE_SLA_INDEX },
+);
+SystemReportSchema.index(
+  { status: 1, decisionDueAt: 1, publicId: 1 },
+  { name: ADMIN_SYSTEM_REPORT_QUEUE_DECISION_SLA_INDEX },
+);

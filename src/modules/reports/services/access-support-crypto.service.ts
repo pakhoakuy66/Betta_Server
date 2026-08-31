@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
   createCipheriv,
+  createDecipheriv,
   createHmac,
   randomBytes,
   timingSafeEqual,
@@ -37,6 +38,46 @@ export class AccessSupportCryptoService {
       ciphertext.toString('base64url'),
       tag.toString('base64url'),
     ].join('.');
+  }
+
+  decrypt(value: string, reportPublicId: string, field: string): string {
+    try {
+      const parts = value.split('.');
+      if (
+        parts.length !== 6 ||
+        `${parts[0]}.${parts[1]}` !== ACCESS_SUPPORT_ENCRYPTED_PREFIX
+      ) {
+        throw new Error('invalid envelope');
+      }
+
+      const [, , keyId, encodedIv, encodedCiphertext, encodedTag] = parts;
+      const key = this.secrets.encryption.all.find(
+        (candidate) => candidate.id === keyId,
+      );
+      if (!key) throw new Error('unknown key');
+
+      const iv = Buffer.from(encodedIv, 'base64url');
+      const ciphertext = Buffer.from(encodedCiphertext, 'base64url');
+      const tag = Buffer.from(encodedTag, 'base64url');
+      if (iv.length !== 12 || ciphertext.length === 0 || tag.length !== 16) {
+        throw new Error('invalid envelope length');
+      }
+
+      const aad = Buffer.from(
+        `${ACCESS_SUPPORT_ENCRYPTION_AAD_DOMAIN}:${reportPublicId}:${field}`,
+        'utf8',
+      );
+      const decipher = createDecipheriv('aes-256-gcm', key.key, iv);
+      decipher.setAAD(aad);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([
+        decipher.update(ciphertext),
+        decipher.final(),
+      ]).toString('utf8');
+    } catch {
+      // Không đưa envelope, key id hoặc plaintext vào exception/log.
+      throw new Error('Access-support ciphertext không hợp lệ');
+    }
   }
 
   hmac(domain: string, value: string): string {

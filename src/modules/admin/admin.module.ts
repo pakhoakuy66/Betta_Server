@@ -3,11 +3,18 @@ import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
+import { OutboxModule } from '../../common/outbox/outbox.module';
 import {
   AuthSession,
   AuthSessionSchema,
 } from '../auth/schemas/auth-session.schema';
+import { Post, PostSchema } from '../posts/schemas/post.schema';
+import { AccessSupportSecurityModule } from '../reports/access-support-security.module';
 import { Report, ReportSchema } from '../reports/schemas/report.schema';
+import {
+  SystemReport,
+  SystemReportSchema,
+} from '../reports/schemas/system-report.schema';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import {
   ADMIN_POLICY,
@@ -20,11 +27,19 @@ import {
 import { AUTH_SECRET_MATERIAL_BOUNDARY_PROVIDER } from './config/auth-secret-material-boundary.config';
 import { ADMIN_AUTHORIZATION_CLOCK_PROVIDER } from './constants/admin-authorization-state.constants';
 import { ADMIN_USER_RESTRICTION_EXPIRY_CLOCK_PROVIDER } from './constants/admin-user-restriction-expiry.constants';
+import { ADMIN_REPORT_DECISION_FAILURE_INJECTOR } from './constants/admin-report-decision.constants';
+import { ADMIN_POST_MODERATION_FAILURE_INJECTOR } from './constants/admin-post-moderation.constants';
 import { AdminAuditController } from './controllers/admin-audit.controller';
 import { AdminAccountLifecycleController } from './controllers/admin-account-lifecycle.controller';
 import { AdminAccountQueryController } from './controllers/admin-account-query.controller';
 import { AdminAccountStatusController } from './controllers/admin-account-status.controller';
 import { AdminAccountDeletionController } from './controllers/admin-account-deletion.controller';
+import { AdminReportAssignmentController } from './controllers/admin-report-assignment.controller';
+import { AdminReportDecisionController } from './controllers/admin-report-decision.controller';
+import { AdminReportQueueController } from './controllers/admin-report-queue.controller';
+import { AdminAccessSupportContactController } from './controllers/admin-access-support-contact.controller';
+import { AdminPostModerationDetailController } from './controllers/admin-post-moderation-detail.controller';
+import { AdminPostModerationController } from './controllers/admin-post-moderation.controller';
 import { AdminUserQueryController } from './controllers/admin-user-query.controller';
 import { AdminUserRestrictionController } from './controllers/admin-user-restriction.controller';
 import { AdminUserDeletionController } from './controllers/admin-user-deletion.controller';
@@ -111,19 +126,62 @@ import {
   AdminUserDeletionRequestSchema,
 } from './schemas/admin-user-deletion-request.schema';
 import { AdminUserDeletionService } from './services/admin-user-deletion.service';
+import {
+  AdminReportAssignmentRequest,
+  AdminReportAssignmentRequestSchema,
+} from './schemas/admin-report-assignment-request.schema';
+import { AdminReportAccessLogger } from './services/admin-report-access-logger.service';
+import { AdminReportAssignmentService } from './services/admin-report-assignment.service';
+import { AdminReportDecisionService } from './services/admin-report-decision.service';
+import { AdminReportTargetMutationService } from './services/admin-report-target-mutation.service';
+import { AdminReportQueueService } from './services/admin-report-queue.service';
+import { AdminAccessSupportContactService } from './services/admin-access-support-contact.service';
+import { AdminPostModerationAccessLogger } from './services/admin-post-moderation-access-logger.service';
+import { AdminPostModerationDetailService } from './services/admin-post-moderation-detail.service';
+import { AdminPostLifecycleService } from './services/admin-post-lifecycle.service';
+import { AdminPostModerationService } from './services/admin-post-moderation.service';
 import { AdminUserModerationHistoryService } from './services/admin-user-moderation-history.service';
+import {
+  AdminReportDecisionRequest,
+  AdminReportDecisionRequestSchema,
+} from './schemas/admin-report-decision-request.schema';
+import {
+  ModerationDecision,
+  ModerationDecisionSchema,
+} from './schemas/moderation-decision.schema';
+import {
+  AdminPostModerationRequest,
+  AdminPostModerationRequestSchema,
+} from './schemas/admin-post-moderation-request.schema';
 
 @Module({
   imports: [
     ConfigModule,
+    AccessSupportSecurityModule,
+    OutboxModule,
     PassportModule,
     JwtModule.register({}),
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: AuthSession.name, schema: AuthSessionSchema },
       { name: Report.name, schema: ReportSchema },
+      { name: SystemReport.name, schema: SystemReportSchema },
+      { name: Post.name, schema: PostSchema },
+      { name: ModerationDecision.name, schema: ModerationDecisionSchema },
+      {
+        name: AdminPostModerationRequest.name,
+        schema: AdminPostModerationRequestSchema,
+      },
+      {
+        name: AdminReportDecisionRequest.name,
+        schema: AdminReportDecisionRequestSchema,
+      },
       { name: AdminAccount.name, schema: AdminAccountSchema },
       { name: AdminAuditEvent.name, schema: AdminAuditEventSchema },
+      {
+        name: AdminReportAssignmentRequest.name,
+        schema: AdminReportAssignmentRequestSchema,
+      },
       { name: AdminSession.name, schema: AdminSessionSchema },
       { name: AdminBootstrapState.name, schema: AdminBootstrapStateSchema },
       { name: AdminRecoveryGrant.name, schema: AdminRecoveryGrantSchema },
@@ -151,6 +209,12 @@ import { AdminUserModerationHistoryService } from './services/admin-user-moderat
     ]),
   ],
   controllers: [
+    AdminPostModerationController,
+    AdminPostModerationDetailController,
+    AdminReportAssignmentController,
+    AdminReportDecisionController,
+    AdminReportQueueController,
+    AdminAccessSupportContactController,
     AdminUserQueryController,
     AdminAuditController,
     AdminAuthController,
@@ -164,6 +228,24 @@ import { AdminUserModerationHistoryService } from './services/admin-user-moderat
     AdminUserModerationHistoryController,
   ],
   providers: [
+    {
+      provide: ADMIN_POST_MODERATION_FAILURE_INJECTOR,
+      useValue: Object.freeze({ hit: () => undefined }),
+    },
+    {
+      provide: ADMIN_REPORT_DECISION_FAILURE_INJECTOR,
+      useValue: Object.freeze({ hit: () => undefined }),
+    },
+    AdminPostModerationAccessLogger,
+    AdminPostModerationDetailService,
+    AdminPostLifecycleService,
+    AdminPostModerationService,
+    AdminReportAssignmentService,
+    AdminReportDecisionService,
+    AdminReportTargetMutationService,
+    AdminReportQueueService,
+    AdminAccessSupportContactService,
+    AdminReportAccessLogger,
     AdminUserQueryService,
     AdminUserAccessLogger,
     ADMIN_POLICY_PROVIDER,
@@ -214,6 +296,14 @@ import { AdminUserModerationHistoryService } from './services/admin-user-moderat
   ],
   exports: [
     MongooseModule,
+    AdminPostModerationDetailService,
+    AdminPostLifecycleService,
+    AdminPostModerationService,
+    AdminReportAssignmentService,
+    AdminReportDecisionService,
+    AdminReportTargetMutationService,
+    AdminReportQueueService,
+    AdminAccessSupportContactService,
     AdminUserQueryService,
     ADMIN_POLICY,
     ADMIN_SECRETS,

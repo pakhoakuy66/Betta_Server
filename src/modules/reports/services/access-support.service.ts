@@ -1,10 +1,17 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { createHash } from 'crypto';
 import { Model } from 'mongoose';
 import {
   ACCESS_SUPPORT_ACKNOWLEDGEMENT,
   ACCESS_SUPPORT_DEDUPE_WINDOW_SECONDS,
+  ACCESS_SUPPORT_DESCRIPTION_MAX_LENGTH,
+  ACCESS_SUPPORT_DESCRIPTION_MIN_LENGTH,
   ACCESS_SUPPORT_SENSITIVE_DATA_MESSAGE,
 } from '../constants/access-support.constants';
 import { AccessSupportRequestDto } from '../dto/access-support-request.dto';
@@ -16,6 +23,7 @@ import {
 import { AccessSupportCryptoService } from './access-support-crypto.service';
 import { AccessSupportDedupeService } from './access-support-dedupe.service';
 import { AccessSupportRateLimitService } from './access-support-rate-limit.service';
+import { maskAccessSupportContactEmail } from '../utils/mask-access-support-contact.util';
 
 const CREDENTIAL_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9._~+/-]+=*/iu,
@@ -44,12 +52,31 @@ export class AccessSupportService {
     dto: AccessSupportRequestDto,
     clientIp?: string,
     challengeHeader?: string,
+    ipAttemptAlreadyConsumed = false,
+  ): Promise<AccessSupportResponse> {
+    try {
+      return await this.submitInternal(
+        dto,
+        clientIp,
+        challengeHeader,
+        ipAttemptAlreadyConsumed,
+      );
+    } catch (error: unknown) {
+      if (error instanceof HttpException) throw error;
+      throw new ServiceUnavailableException(
+        'Không thể ghi nhận yêu cầu hỗ trợ vào lúc này',
+      );
+    }
+  }
+
+  private async submitInternal(
+    dto: AccessSupportRequestDto,
+    clientIp?: string,
+    challengeHeader?: string,
+    ipAttemptAlreadyConsumed = false,
   ): Promise<AccessSupportResponse> {
     const normalized = this.normalize(dto);
-    this.assertNoCredentialMaterial([
-      normalized.description,
-      normalized.accountEmailOrUsername ?? '',
-    ]);
+    this.assertNormalizedDescriptionLength(normalized.description);
 
     const fingerprintInput = JSON.stringify({
       category: normalized.category,
@@ -59,20 +86,27 @@ export class AccessSupportService {
     });
     const requestFingerprint = this.crypto.hmac('dedupe', fingerprintInput);
 
-    await this.rateLimit.consumeIp(
-      clientIp,
-      requestFingerprint,
-      challengeHeader,
-    );
-
-    const duplicate = await this.findDuplicate(requestFingerprint);
-    if (duplicate?.publicId) return this.response(duplicate.publicId);
+    if (!ipAttemptAlreadyConsumed) {
+      await this.rateLimit.consumeIp(
+        clientIp,
+        requestFingerprint,
+        challengeHeader,
+      );
+    }
 
     const contactLookupHmac = this.crypto.hmac(
       'contact-lookup',
       normalized.contactEmail,
     );
     await this.rateLimit.consumeContact(contactLookupHmac);
+
+    this.assertNoCredentialMaterial([
+      normalized.description,
+      normalized.accountEmailOrUsername ?? '',
+    ]);
+
+    const duplicate = await this.findDuplicate(requestFingerprint);
+    if (duplicate?.publicId) return this.response(duplicate.publicId);
 
     const { reportPublicId } = await this.dedupe.claim(requestFingerprint);
     const descriptionHash = createHash('sha256')
@@ -90,6 +124,9 @@ export class AccessSupportService {
           normalized.contactEmail,
           reportPublicId,
           'contactEmail',
+        ),
+        contactEmailMasked: maskAccessSupportContactEmail(
+          normalized.contactEmail,
         ),
         contactLookupHmac,
         encryptedAccountIdentifier: normalized.accountEmailOrUsername
@@ -141,6 +178,18 @@ export class AccessSupportService {
       })
       .join('')
       .trim();
+  }
+
+  private assertNormalizedDescriptionLength(value: string): void {
+    const length = Array.from(value).length;
+    if (
+      length < ACCESS_SUPPORT_DESCRIPTION_MIN_LENGTH ||
+      length > ACCESS_SUPPORT_DESCRIPTION_MAX_LENGTH
+    ) {
+      throw new BadRequestException(
+        `Mô tả phải có từ ${ACCESS_SUPPORT_DESCRIPTION_MIN_LENGTH} đến ${ACCESS_SUPPORT_DESCRIPTION_MAX_LENGTH} ký tự sau khi chuẩn hóa`,
+      );
+    }
   }
 
   private assertNoCredentialMaterial(values: string[]): void {

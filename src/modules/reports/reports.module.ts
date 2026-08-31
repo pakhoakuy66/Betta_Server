@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ReportsService } from './services/reports.service';
 import { ReportRateLimitService } from './services/report-rate-limit.service';
@@ -26,8 +27,6 @@ import { Block, BlockSchema } from '../relationshipModule/schemas/block.schema';
 import { UploadsModule } from '../uploads/uploads.module';
 import { ReportIssueUploadRateLimitGuard } from './guards/report-issue-upload-rate-limit.guard';
 import { ReportStatusTransitionService } from './services/report-status-transition.service';
-import { AccessSupportSecretsConfig } from './config/access-support-secrets.config';
-import { AccessSupportCryptoService } from './services/access-support-crypto.service';
 import { AccessSupportRateLimitService } from './services/access-support-rate-limit.service';
 import { AccessSupportService } from './services/access-support.service';
 import { AccessSupportBodyLimitGuard } from './guards/access-support-body-limit.guard';
@@ -36,9 +35,12 @@ import {
   AccessSupportDedupeSchema,
 } from './schemas/access-support-dedupe.schema';
 import { AccessSupportDedupeService } from './services/access-support-dedupe.service';
+import { AccessSupportSecurityModule } from './access-support-security.module';
 
 @Module({
   imports: [
+    ConfigModule,
+    AccessSupportSecurityModule,
     UploadsModule,
     MongooseModule.forFeature([
       { name: Report.name, schema: ReportSchema },
@@ -57,14 +59,12 @@ import { AccessSupportDedupeService } from './services/access-support-dedupe.ser
     ReportRateLimitService,
     ReportIssueUploadRateLimitGuard,
     ReportStatusTransitionService,
-    AccessSupportSecretsConfig,
-    AccessSupportCryptoService,
     AccessSupportRateLimitService,
     AccessSupportService,
     AccessSupportBodyLimitGuard,
     AccessSupportDedupeService,
   ],
   controllers: [ReportsController],
-  exports: [ReportStatusTransitionService],
+  exports: [ReportStatusTransitionService, AccessSupportRateLimitService],
 })
 export class ReportsModule {}

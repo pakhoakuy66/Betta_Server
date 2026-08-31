@@ -1,5 +1,8 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { createHash } from 'crypto';
 import type { Model } from 'mongoose';
 import type { AccessSupportRequestDto } from '../dto/access-support-request.dto';
@@ -38,11 +41,15 @@ describe('AccessSupportService', () => {
       hmac,
       encrypt: jest.fn((value: string) => `encrypted:${value.length}`),
     } as unknown as AccessSupportCryptoService;
+    const consumeIp = jest
+      .fn<AccessSupportRateLimitService['consumeIp']>()
+      .mockResolvedValue(undefined);
+    const consumeContact = jest
+      .fn<AccessSupportRateLimitService['consumeContact']>()
+      .mockResolvedValue(undefined);
     const rateLimit = {
-      consumeIp: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-      consumeContact: jest
-        .fn<() => Promise<void>>()
-        .mockResolvedValue(undefined),
+      consumeIp,
+      consumeContact,
     } as unknown as AccessSupportRateLimitService;
     const claim = jest
       .fn<() => Promise<{ reportPublicId: string }>>()
@@ -53,11 +60,13 @@ describe('AccessSupportService', () => {
       create,
       claim,
       hmac,
+      consumeIp,
+      consumeContact,
     };
   };
 
   it('returns the same safe acknowledgement for a recent duplicate', async () => {
-    const { service, create, claim } = createService({
+    const { service, create, claim, consumeContact } = createService({
       publicId: 'srep_duplicate123456',
     });
     await expect(service.submit(request, '127.0.0.1')).resolves.toEqual({
@@ -67,6 +76,7 @@ describe('AccessSupportService', () => {
     });
     expect(create).not.toHaveBeenCalled();
     expect(claim).not.toHaveBeenCalled();
+    expect(consumeContact).toHaveBeenCalledTimes(1);
   });
 
   it('encrypts contact fields and never persists their plaintext', async () => {
@@ -76,8 +86,49 @@ describe('AccessSupportService', () => {
     expect(persisted.publicId).toBe('srep_newreport23456');
     expect(persisted.reporterId).toBeNull();
     expect(persisted.encryptedContactEmail).toBe('encrypted:18');
+    expect(persisted.contactEmailMasked).toBe('p***@e***.com');
     expect(JSON.stringify(persisted)).not.toContain('person@example.com');
     expect(persisted).not.toHaveProperty('password');
+  });
+
+  it('does not acknowledge before the durable report write succeeds', async () => {
+    const { service, create } = createService();
+    create.mockRejectedValueOnce(new Error('storage unavailable'));
+
+    let caught: unknown;
+    try {
+      await service.submit(request, '127.0.0.1');
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ServiceUnavailableException);
+    expect(JSON.stringify(caught)).not.toContain('storage unavailable');
+  });
+
+  it('rejects a description that becomes too short after control-character cleanup', async () => {
+    const { service, create } = createService();
+
+    await expect(
+      service.submit(
+        {
+          ...request,
+          description: '\u0000'.repeat(20),
+        },
+        '127.0.0.1',
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('does not double-count IP after the HTTP pre-parser middleware', async () => {
+    const { service, consumeIp, consumeContact } = createService({
+      publicId: 'srep_duplicate123456',
+    });
+
+    await service.submit(request, '127.0.0.1', undefined, true);
+
+    expect(consumeIp).not.toHaveBeenCalled();
+    expect(consumeContact).toHaveBeenCalledTimes(1);
   });
 
   it('excludes correlation id from semantic dedupe but persists it for tracing', async () => {
@@ -104,7 +155,7 @@ describe('AccessSupportService', () => {
   });
 
   it('rejects credential-like material before persistence', async () => {
-    const { service, create } = createService();
+    const { service, create, consumeIp, consumeContact } = createService();
     await expect(
       service.submit(
         {
@@ -114,6 +165,8 @@ describe('AccessSupportService', () => {
         '127.0.0.1',
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
+    expect(consumeIp).toHaveBeenCalledTimes(1);
+    expect(consumeContact).toHaveBeenCalledTimes(1);
     expect(create).not.toHaveBeenCalled();
   });
 
