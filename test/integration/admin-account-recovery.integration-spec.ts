@@ -314,7 +314,7 @@ describe('Admin account recovery MongoDB integration', () => {
   it('binds re-auth grants and allows exactly one concurrent consumer', async () => {
     const value = await fixture();
     const targetPublicId = 'adm_ABCDEFGHJKLM';
-    const issuedAt = Date.now();
+    const issueStartedAt = Date.now();
     const issued = await reauth.issue({
       adminAccountId: value.account._id,
       adminPublicId: value.account.publicId,
@@ -332,10 +332,14 @@ describe('Admin account recovery MongoDB integration', () => {
       source: AdminAuditSource.HTTP,
     });
 
-    expect(issued.expiresAt.getTime() - issuedAt).toBeGreaterThanOrEqual(
-      295_000,
+    const issueCompletedAt = Date.now();
+    const expectedGrantTtlMs = 300_000;
+    expect(issued.expiresAt.getTime()).toBeGreaterThanOrEqual(
+      issueStartedAt + expectedGrantTtlMs,
     );
-    expect(issued.expiresAt.getTime() - issuedAt).toBeLessThanOrEqual(301_000);
+    expect(issued.expiresAt.getTime()).toBeLessThanOrEqual(
+      issueCompletedAt + expectedGrantTtlMs,
+    );
 
     const stored = await reauthGrants
       .findOne({ adminPublicId: value.account.publicId })

@@ -24,6 +24,9 @@ export enum UserModerationNoticeAction {
   INDEFINITE_BAN_REMOVED = 'INDEFINITE_BAN_REMOVED',
   ADMIN_SOFT_DELETE_APPLIED = 'ADMIN_SOFT_DELETE_APPLIED',
   ADMIN_SOFT_DELETE_RESTORED = 'ADMIN_SOFT_DELETE_RESTORED',
+  POST_HIDDEN = 'POST_HIDDEN',
+  POST_RESTORED = 'POST_RESTORED',
+  POST_TERMINAL_DELETED = 'POST_TERMINAL_DELETED',
 }
 
 export enum UserModerationNoticeStatus {
@@ -36,4 +39,7 @@ export const UserModerationPublicReason = Object.freeze({
   RESTRICTION_REMOVED: 'account_access_restored',
   ADMIN_DELETED: 'account_removed_by_moderation',
   ADMIN_RESTORED: 'account_restored_by_moderation',
+  POST_VISIBILITY_UPDATED: 'content_visibility_updated',
+  POST_POLICY_REVIEW: 'community_policy_review',
+  POST_SEVERE_VIOLATION: 'severe_policy_violation',
 });

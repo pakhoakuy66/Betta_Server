@@ -63,6 +63,12 @@ const PERMISSION_BY_ACTION: Readonly<
   [AdminAuditAction.ADMIN_UNLOCKED]: AdminPermission.ADMINS_UNLOCK,
   [AdminAuditAction.ADMIN_DELETED]: AdminPermission.ADMINS_DELETE,
   [AdminAuditAction.ADMIN_RESTORED]: AdminPermission.ADMINS_RESTORE,
+  [AdminAuditAction.USER_SUSPENDED]: AdminPermission.USERS_SUSPEND,
+  [AdminAuditAction.USER_UNSUSPENDED]: AdminPermission.USERS_UNSUSPEND,
+  [AdminAuditAction.USER_BANNED]: AdminPermission.USERS_BAN,
+  [AdminAuditAction.USER_UNBANNED]: AdminPermission.USERS_UNBAN,
+  [AdminAuditAction.USER_DELETED]: AdminPermission.USERS_SOFT_DELETE,
+  [AdminAuditAction.USER_RESTORED]: AdminPermission.USERS_RESTORE,
 });
 
 type StoredLifecycleAudit = Readonly<{

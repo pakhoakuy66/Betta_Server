@@ -1,8 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { type Model, Types } from 'mongoose';
 import type { ClaimedOutboxEvent } from '../../../common/outbox/outbox.interface';
 import { NotificationsService } from '../../notifications/services/notifications.service';
+import { Post, PostModerationState } from '../../posts/schemas/post.schema';
+import { isValidPostPublicId } from '../../posts/utils/generate-post-public-id';
 import { AdminUserDeletionOperation } from '../../admin/constants/admin-user-deletion.constants';
 import { AdminUserRestrictionOperation } from '../../admin/constants/admin-user-restriction.constants';
 import {
@@ -45,6 +47,12 @@ type UserTarget = Readonly<{
   isDeleted: boolean;
   status: string;
 }>;
+type PostTarget = Readonly<{
+  _id: Types.ObjectId;
+  authorId: Types.ObjectId;
+  publicId: string;
+  moderationVersion: number;
+}>;
 
 @Injectable()
 export class UserModerationNoticeService {
@@ -53,7 +61,83 @@ export class UserModerationNoticeService {
     private readonly notices: Model<UserModerationNotice>,
     @InjectModel(User.name) private readonly users: Model<User>,
     private readonly notifications: NotificationsService,
+    @Optional()
+    @InjectModel(Post.name)
+    private readonly posts?: Model<Post>,
   ) {}
+
+  async consumePostEvent(event: ClaimedOutboxEvent): Promise<void> {
+    if (!this.posts) throw this.invalidEvent();
+    const payload = this.record(event.payload);
+    const state = payload.state;
+    const moderationVersion = payload.moderationVersion;
+    if (
+      event.schemaVersion !== 1 ||
+      event.aggregateType !== 'post' ||
+      !isValidPostPublicId(event.aggregatePublicId) ||
+      payload.schemaVersion !== 1 ||
+      payload.postPublicId !== event.aggregatePublicId ||
+      (state !== PostModerationState.HIDDEN &&
+        state !== PostModerationState.ACTIVE &&
+        state !== PostModerationState.TERMINAL_DELETED) ||
+      !Number.isSafeInteger(moderationVersion) ||
+      Number(moderationVersion) < 1
+    ) {
+      throw this.invalidEvent();
+    }
+
+    const post = await this.posts
+      .findOne({ publicId: event.aggregatePublicId })
+      .select('_id authorId publicId +moderationVersion')
+      .lean<PostTarget | null>()
+      .exec();
+    if (!post || post.moderationVersion < Number(moderationVersion)) {
+      throw this.invalidEvent();
+    }
+    const target = await this.users
+      .findById(post.authorId)
+      .select('_id publicId isDeleted status')
+      .lean<UserTarget | null>()
+      .exec();
+    if (!target) {
+      await this.acknowledgePostNotice(post, Number(moderationVersion));
+      return;
+    }
+
+    const suppliedReason = payload.publicReasonCode;
+    if (
+      typeof suppliedReason !== 'string' ||
+      !USER_RESTRICTION_PUBLIC_REASON_PATTERN.test(suppliedReason)
+    ) {
+      throw this.invalidEvent();
+    }
+    const publicAction =
+      state === PostModerationState.HIDDEN
+        ? UserModerationNoticeAction.POST_HIDDEN
+        : state === PostModerationState.ACTIVE
+          ? UserModerationNoticeAction.POST_RESTORED
+          : UserModerationNoticeAction.POST_TERMINAL_DELETED;
+    const notice = await this.persist({
+      sourceEventPublicId: event.publicId,
+      sourceDedupeKey: event.dedupeKey,
+      targetUserId: target._id,
+      targetPublicId: target.publicId,
+      noticeType: 'SYSTEM_MODERATION',
+      publicAction,
+      publicReasonCode: suppliedReason,
+      effectiveAt: event.occurredAt,
+      expiresAt: null,
+      supportReference: generateModerationSupportReference(),
+      status:
+        state === PostModerationState.ACTIVE
+          ? UserModerationNoticeStatus.RESOLVED
+          : UserModerationNoticeStatus.ACTIVE,
+      occurredAt: event.occurredAt,
+      retentionExpiresAt: this.retention(event.occurredAt, null),
+    });
+    await this.notifyEligible(target, notice);
+    await this.acknowledgePostNotice(post, Number(moderationVersion));
+  }
 
   async consumeRestrictionEvent(event: ClaimedOutboxEvent): Promise<void> {
     const target = await this.loadTarget(event);
@@ -241,6 +325,38 @@ export class UserModerationNoticeService {
       expiresAt: notice.expiresAt,
       supportReference: notice.supportReference,
     });
+  }
+
+  private async notifyEligible(
+    target: UserTarget,
+    notice: UserModerationNotice,
+  ): Promise<void> {
+    if (target.isDeleted || target.status !== 'active') return;
+    await this.notifications.createSystemModerationNotification({
+      recipientId: target._id,
+      noticePublicId: notice.publicId,
+      action: notice.publicAction,
+      publicReasonCode: notice.publicReasonCode,
+      effectiveAt: notice.effectiveAt,
+      expiresAt: notice.expiresAt,
+      supportReference: notice.supportReference,
+    });
+  }
+
+  private async acknowledgePostNotice(
+    post: PostTarget,
+    moderationVersion: number,
+  ): Promise<void> {
+    if (!this.posts) throw this.invalidEvent();
+    await this.posts
+      .updateOne(
+        {
+          _id: post._id,
+          moderationVersion: { $gte: moderationVersion },
+        },
+        { $max: { moderationNoticeVersion: moderationVersion } },
+      )
+      .exec();
   }
 
   private restrictionAction(

@@ -9,6 +9,7 @@ import { ReactionModule } from '../reactions/reaction.module';
 import { TasksService } from './services/tasks.service';
 import { ExpiredPostCleanupService } from './services/expired-post-cleanup.service';
 import { AdminModule } from '../admin/admin.module';
+import { Report, ReportSchema } from '../reports/schemas/report.schema';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { AdminModule } from '../admin/admin.module';
     MongooseModule.forFeature([
       { name: Post.name, schema: PostSchema },
       { name: User.name, schema: UserSchema },
+      { name: Report.name, schema: ReportSchema },
     ]),
     UploadsModule,
   ],

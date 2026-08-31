@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { Post, PostSchema } from '../posts/schemas/post.schema';
 import {
   UserModerationNotice,
   UserModerationNoticeSchema,
@@ -8,6 +9,7 @@ import {
 import { User, UserSchema } from './schemas/user.schema';
 import {
   UserDeletionChangedHandler,
+  PostModerationChangedHandler,
   UserRestrictionChangedHandler,
 } from './services/user-moderation-notice.handlers';
 import { UserModerationNoticeService } from './services/user-moderation-notice.service';
@@ -17,6 +19,7 @@ import { UserModerationNoticeService } from './services/user-moderation-notice.s
     NotificationsModule,
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
+      { name: Post.name, schema: PostSchema },
       { name: UserModerationNotice.name, schema: UserModerationNoticeSchema },
     ]),
   ],
@@ -24,6 +27,7 @@ import { UserModerationNoticeService } from './services/user-moderation-notice.s
     UserModerationNoticeService,
     UserRestrictionChangedHandler,
     UserDeletionChangedHandler,
+    PostModerationChangedHandler,
   ],
   exports: [UserModerationNoticeService],
 })

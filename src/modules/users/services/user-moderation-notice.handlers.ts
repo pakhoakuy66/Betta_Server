@@ -6,6 +6,7 @@ import type {
 } from '../../../common/outbox/outbox.interface';
 import { ADMIN_USER_DELETION_EVENT_TYPE } from '../../admin/constants/admin-user-deletion.constants';
 import { ADMIN_USER_RESTRICTION_EVENT_TYPE } from '../../admin/constants/admin-user-restriction.constants';
+import { ADMIN_POST_MODERATION_EVENT_TYPE } from '../../admin/constants/admin-post-moderation.constants';
 import { UserModerationNoticeService } from './user-moderation-notice.service';
 
 @Injectable()
@@ -45,5 +46,25 @@ export class UserDeletionChangedHandler
 
   handle(event: ClaimedOutboxEvent): Promise<void> {
     return this.notices.consumeDeletionEvent(event);
+  }
+}
+
+@Injectable()
+export class PostModerationChangedHandler
+  implements OutboxEventHandler, OnModuleInit
+{
+  readonly eventType = ADMIN_POST_MODERATION_EVENT_TYPE;
+
+  constructor(
+    private readonly registry: OutboxHandlerRegistry,
+    private readonly notices: UserModerationNoticeService,
+  ) {}
+
+  onModuleInit(): void {
+    this.registry.register(this);
+  }
+
+  handle(event: ClaimedOutboxEvent): Promise<void> {
+    return this.notices.consumePostEvent(event);
   }
 }

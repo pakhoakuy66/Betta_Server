@@ -24,6 +24,7 @@ import {
   ADMIN_ACCOUNT_GLOBAL_LIST_INDEX,
   ADMIN_ACCOUNT_LIST_INDEX,
   AdminAccount,
+  AdminAccountDeletionOrigin,
   AdminAccountStatus,
   AdminMfaStatus,
   AdminRole,
@@ -192,7 +193,11 @@ describe('Admin account query MongoDB integration', () => {
         role: AdminRole.ADMIN,
         status: AdminAccountStatus.SOFT_DELETED,
         mfaStatus: AdminMfaStatus.RESET_REQUIRED,
+        passwordHash: `$2b$12$${'a'.repeat(53)}`,
+        mustChangePassword: false,
+        activationGrantConsumedAt: new Date('2026-08-01T00:00:00.000Z'),
         deletedAt: new Date('2026-08-11T00:00:00.000Z'),
+        deletionOrigin: AdminAccountDeletionOrigin.ADMIN,
       },
     ]);
 
@@ -306,7 +311,11 @@ describe('Admin account query MongoDB integration', () => {
       role: AdminRole.ADMIN,
       status: AdminAccountStatus.SOFT_DELETED,
       mfaStatus: AdminMfaStatus.RESET_REQUIRED,
+      passwordHash: `$2b$12$${'b'.repeat(53)}`,
+      mustChangePassword: false,
+      activationGrantConsumedAt: new Date('2026-08-01T00:00:00.000Z'),
       deletedAt: new Date('2026-08-11T05:00:00.000Z'),
+      deletionOrigin: AdminAccountDeletionOrigin.ADMIN,
     });
 
     await expect(service.detail('adm_6789ABCDEFGH')).resolves.toMatchObject({
