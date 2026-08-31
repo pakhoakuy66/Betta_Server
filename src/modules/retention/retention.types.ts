@@ -11,6 +11,7 @@ export type CollectionCleanupResult = {
   skipped: number;
   failed: number;
   lostOwnership: number;
+  manualReview: number;
   truncated: boolean;
   durationMs: number;
 };
@@ -25,8 +26,12 @@ export type DataRetentionResult = {
   updated: number;
   deleted: number;
   failed: number;
+  lostOwnership: number;
+  manualReview: number;
+  requiresIntervention: boolean;
   hasMore: boolean;
   invalidEngagementEvents: number;
+  backupReferenceAccepted: boolean;
   results: CollectionCleanupResult[];
 };
 
@@ -35,5 +40,6 @@ export type RunDataRetentionOptions = {
   execute?: boolean;
   maxDocuments?: number;
   confirmation?: string;
+  backupReference?: string;
   now?: Date;
 };

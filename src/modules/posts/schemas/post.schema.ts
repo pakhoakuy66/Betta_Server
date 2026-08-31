@@ -5,10 +5,17 @@ export enum PostCleanupStatus {
   PENDING = 'pending',
   PROCESSING = 'processing',
   FAILED = 'failed',
+  MANUAL_REVIEW = 'manual_review',
+}
+
+export enum PostModerationState {
+  ACTIVE = 'active',
+  HIDDEN = 'hidden',
+  TERMINAL_DELETED = 'terminal_deleted',
 }
 
 @Schema({
-  timestamps: true, // Tự động tạo createdAt và updatedAt
+  timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true },
 })
@@ -22,14 +29,12 @@ export class Post extends Document {
   })
   publicId!: string;
 
-  // 1. TÁC GIẢ: Liên kết với bảng User
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   authorId!: Types.ObjectId;
 
   @Prop({ type: String, default: null, trim: true })
   idempotencyKey?: string | null;
 
-  // 2. NỘI DUNG: Dạng text (Mục 3.3 SRS)
   @Prop({
     type: String,
     required: false,
@@ -39,12 +44,11 @@ export class Post extends Document {
   })
   content!: string;
 
-  // 3. HÌNH ẢNH: Lưu mảng các URL (Cloudinary)
   @Prop({
     type: [
       {
         url: { type: String, required: true },
-        publicId: { type: String, required: true }, // Dùng để xóa ảnh trên Cloudinary
+        publicId: { type: String, required: true },
       },
     ],
     default: [],
@@ -56,16 +60,12 @@ export class Post extends Document {
   })
   images!: { url: string; publicId: string }[];
 
-  // 4. THỐNG KÊ (Denormalization - Để load nhanh không cần count)
   @Prop({ type: Number, default: 0 })
   likeCount!: number;
 
   @Prop({ type: Number, default: 0 })
   shareCount!: number;
 
-  // 5. CƠ CHẾ TỰ XÓA SAU 24 GIỜ
-  // expireAt là thời điểm bài viết hết hạn.
-  // expireAt dùng để ẩn post khỏi query và cho cron job cleanup tài nguyên.
   @Prop({
     type: Date,
     required: true,
@@ -86,15 +86,56 @@ export class Post extends Document {
   @Prop({ type: Date, default: null, index: true })
   cleanupLockedUntil?: Date | null;
 
+  @Prop({ type: String, default: null, select: false })
+  cleanupLockToken!: string | null;
+
+  /**
+   * Point-of-no-return fence. Lease hết hạn sau mốc này không được reclaim;
+   * lỗi xóa vật lý phải đi manual review để tránh lặp side effect mơ hồ.
+   */
+  @Prop({ type: Date, default: null, select: false })
+  cleanupDestructiveStartedAt!: Date | null;
+
   @Prop({ type: Number, default: 0 })
   cleanupAttempts!: number;
 
   @Prop({ type: String, default: null })
   cleanupLastError?: string | null;
 
-  // Thêm vào trong Post class
+  @Prop({
+    type: String,
+    enum: Object.values(PostModerationState),
+    default: PostModerationState.ACTIVE,
+    select: false,
+  })
+  moderationState!: PostModerationState;
+
+  @Prop({ type: Number, default: 0, min: 0, select: false })
+  moderationVersion!: number;
+
+  @Prop({ type: Date, default: null, select: false })
+  moderatedAt!: Date | null;
+
+  @Prop({ type: Date, default: null, select: false })
+  moderationTerminalAt!: Date | null;
+
+  @Prop({ type: String, default: null, select: false })
+  moderationReasonCode!: string | null;
+
+  @Prop({ type: String, default: null, select: false })
+  moderatedByAdminPublicId!: string | null;
+
+  @Prop({ type: Number, default: 0, min: 0, select: false })
+  moderationNoticeVersion!: number;
+
+  @Prop({ type: Date, default: null, select: false, index: true })
+  evidenceHoldUntil!: Date | null;
+
+  @Prop({ type: Boolean, default: false, select: false })
+  evidenceUnavailable!: boolean;
+
   @Prop({ type: Boolean, default: false })
-  isDeletedByAdmin!: boolean; // Để ẩn bài viết nếu vi phạm (dù chưa hết 24h)
+  isDeletedByAdmin!: boolean;
 }
 
 export const PostSchema = SchemaFactory.createForClass(Post);
@@ -104,13 +145,11 @@ PostSchema.pre('validate', function () {
   const hasContent = Boolean(post.content?.trim());
   const hasImages = Array.isArray(post.images) && post.images.length > 0;
 
-  // SRS cho phép chỉ text, chỉ ảnh, hoặc cả hai; nhưng không cho post rỗng.
   if (!hasContent && !hasImages) {
     throw new Error('Bài viết phải có nội dung hoặc ít nhất một ảnh');
   }
 });
 
-// Thêm Virtual field để hiển thị thông tin tác giả khi populate
 PostSchema.virtual('author', {
   ref: 'User',
   localField: 'authorId',
@@ -134,18 +173,21 @@ PostSchema.index({
 PostSchema.index({
   cleanupStatus: 1,
   cleanupLockedUntil: 1,
+  cleanupDestructiveStartedAt: 1,
   expireAt: 1,
 });
 
+PostSchema.index({
+  moderationState: 1,
+  cleanupStatus: 1,
+  cleanupLockedUntil: 1,
+  evidenceHoldUntil: 1,
+});
+
 PostSchema.index(
-  {
-    authorId: 1,
-    idempotencyKey: 1,
-  },
+  { authorId: 1, idempotencyKey: 1 },
   {
     unique: true,
-    partialFilterExpression: {
-      idempotencyKey: { $type: 'string' },
-    },
+    partialFilterExpression: { idempotencyKey: { $type: 'string' } },
   },
 );

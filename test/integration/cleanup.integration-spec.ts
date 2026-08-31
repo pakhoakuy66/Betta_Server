@@ -377,7 +377,7 @@ describe('Cleanup MongoDB integration', () => {
     });
   });
 
-  it('retains a post after cleanup reaches the retry ceiling', async () => {
+  it('moves an ambiguous physical deletion failure to manual review without retry', async () => {
     const author = await createUser('failed_post_author', 1);
 
     await createPost(
@@ -401,30 +401,33 @@ describe('Cleanup MongoDB integration', () => {
     const result = await expiredPostCleanupService.cleanupExpiredPosts();
 
     expect(result).toEqual({
-      processed: 5,
+      processed: 1,
       deleted: 0,
-      failed: 5,
+      failed: 1,
     });
 
     const [retainedPost, refreshedAuthor] = await Promise.all([
-      postModel.findOne({
-        publicId: POST_IDS.failed,
-      }),
+      postModel
+        .findOne({
+          publicId: POST_IDS.failed,
+        })
+        .select('+cleanupDestructiveStartedAt'),
       userModel.findById(author._id),
     ]);
 
     expect(retainedPost).toEqual(
       expect.objectContaining({
-        cleanupStatus: PostCleanupStatus.FAILED,
+        cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
         cleanupLockedUntil: null,
-        cleanupAttempts: 5,
+        cleanupAttempts: 1,
+        cleanupDestructiveStartedAt: expect.any(Date),
       }),
     );
 
     expect(retainedPost?.cleanupLastError).toContain('Cloudinary unavailable');
 
     expect(refreshedAuthor?.postsCount).toBe(1);
-    expect(deleteImagesMock).toHaveBeenCalledTimes(5);
+    expect(deleteImagesMock).toHaveBeenCalledTimes(1);
 
     await expect(
       expiredPostCleanupService.cleanupExpiredPosts(),

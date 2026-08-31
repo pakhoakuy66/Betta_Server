@@ -1,32 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { randomUUID } from 'node:crypto';
+import { InjectConnection } from '@nestjs/mongoose';
 import type {
   AnyBulkWriteOperation,
   Document as MongoDocument,
   Filter,
 } from 'mongodb';
-import { Connection, Model, Types } from 'mongoose';
-import {
-  RetentionCleanupStatus,
-  SystemReport,
-  SystemReportStatus,
-} from '../reports/schemas/system-report.schema';
-import { UploadsService } from '../uploads/services/uploads.service';
+import { Connection, Types } from 'mongoose';
 import {
   CleanupMode,
   CollectionCleanupResult,
   DataRetentionResult,
   RunDataRetentionOptions,
 } from './retention.types';
+import { ReportEvidenceRetentionService } from './report-evidence-retention.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_DOCUMENTS = 1_000;
 const MAX_DOCUMENTS_LIMIT = 10_000;
-const SYSTEM_REPORT_LOCK_MS = 10 * 60 * 1000;
-const SYSTEM_REPORT_RETRY_DELAY_MS = 6 * 60 * 60 * 1000;
-const SYSTEM_REPORT_MAX_ATTEMPTS = 5;
 const PRODUCTION_CONFIRMATION = 'CONFIRM_PRODUCTION_RETENTION_CLEANUP';
+const BACKUP_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
 const TEST_MARKER_PATTERN = /^codex_cleanup_/;
 
 const RETENTION_DAYS = {
@@ -34,8 +26,6 @@ const RETENTION_DAYS = {
   weeklyRecaps: 365,
   weeklyRecapRuns: 365,
   streakHistories: 365,
-  systemReports: 365,
-  reports: 730,
 } as const;
 
 const TEST_MARKER_COLLECTIONS = [
@@ -57,33 +47,12 @@ const TEST_MARKER_COLLECTIONS = [
   'authratelimits',
 ] as const;
 
-type SystemReportCandidate = {
-  _id: Types.ObjectId;
-  evidenceImages?: { publicId?: string }[];
-  retentionAttempts?: number;
-};
-
 type WeeklyRecapRunRecord = {
   _id: Types.ObjectId;
   status: string;
   weekStart: Date;
   weekEnd: Date;
   timezone: string;
-};
-
-type SystemReportFilter = {
-  _id?: Types.ObjectId | { $in?: Types.ObjectId[] };
-  status?: { $in?: SystemReportStatus[] };
-  terminalAt?: { $lt?: Date } | null;
-  retentionAttempts?: {
-    $lt?: number;
-    $gte?: number;
-    $exists?: boolean;
-  };
-  retentionCleanupStatus?: RetentionCleanupStatus | { $exists?: boolean };
-  retentionLockedUntil?: { $lte?: Date } | { $exists?: boolean } | null;
-  $and?: SystemReportFilter[];
-  $or?: SystemReportFilter[];
 };
 
 @Injectable()
@@ -93,9 +62,7 @@ export class DataRetentionService {
   constructor(
     @InjectConnection()
     private readonly connection: Connection,
-    @InjectModel(SystemReport.name)
-    private readonly systemReportModel: Model<SystemReport>,
-    private readonly uploadsService: UploadsService,
+    private readonly reportEvidenceRetention: ReportEvidenceRetentionService,
   ) {}
 
   async run(
@@ -112,7 +79,12 @@ export class DataRetentionService {
     const maxDocuments = this.normalizeBudget(options.maxDocuments);
     const now = options.now ?? new Date();
 
-    this.assertSafeExecution(mode, execute, options.confirmation);
+    this.assertSafeExecution(
+      mode,
+      execute,
+      options.confirmation,
+      options.backupReference,
+    );
 
     const results: CollectionCleanupResult[] = [];
     let remainingBudget = maxDocuments;
@@ -145,7 +117,37 @@ export class DataRetentionService {
         >
       > = [
         () =>
-          this.reconcileExhaustedSystemReportClaims(
+          this.reportEvidenceRetention.reconcileExhaustedClaims(
+            remainingBudget,
+            execute,
+            now,
+          ),
+        () =>
+          this.reportEvidenceRetention.reconcileMissingPostEvidence(
+            remainingBudget,
+            execute,
+            now,
+          ),
+        () =>
+          this.reportEvidenceRetention.purgeReportEvidence(
+            remainingBudget,
+            execute,
+            now,
+          ),
+        () =>
+          this.reportEvidenceRetention.purgeSystemReportEvidence(
+            remainingBudget,
+            execute,
+            now,
+          ),
+        () =>
+          this.reportEvidenceRetention.deleteSafeReportMetadata(
+            remainingBudget,
+            execute,
+            now,
+          ),
+        () =>
+          this.reportEvidenceRetention.deleteSafeSystemReportMetadata(
             remainingBudget,
             execute,
             now,
@@ -170,19 +172,6 @@ export class DataRetentionService {
             remainingBudget,
             execute,
           ),
-        () =>
-          this.cleanupGenericByDate(
-            'reports',
-            {
-              status: { $in: ['resolved', 'rejected'] },
-              terminalAt: {
-                $lt: this.cutoff(now, RETENTION_DAYS.reports),
-              },
-            },
-            remainingBudget,
-            execute,
-          ),
-        () => this.cleanupSystemReports(remainingBudget, execute, now),
       ];
 
       for (const step of steps) {
@@ -208,12 +197,15 @@ export class DataRetentionService {
     const deleted = this.sum(results, 'deleted');
     const failed = this.sum(results, 'failed');
     const lostOwnership = this.sum(results, 'lostOwnership');
+    const manualReview = this.sum(results, 'manualReview');
+    const requiresIntervention =
+      failed > 0 || lostOwnership > 0 || manualReview > 0;
     const hasMore =
       stoppedBeforeLastStep ||
       results.some((result) => result.truncated || result.failed > 0);
 
     const result: DataRetentionResult = {
-      success: failed === 0,
+      success: !requiresIntervention,
       mode,
       execute,
       database: database.databaseName,
@@ -222,12 +214,17 @@ export class DataRetentionService {
       updated,
       deleted,
       failed,
+      lostOwnership,
+      manualReview,
+      requiresIntervention,
       hasMore,
       invalidEngagementEvents,
+      backupReferenceAccepted:
+        execute && mode === 'retention' && Boolean(options.backupReference),
       results,
     };
 
-    this.logSummary(result, lostOwnership);
+    this.logSummary(result);
 
     return result;
   }
@@ -492,266 +489,6 @@ export class DataRetentionService {
     });
   }
 
-  private async reconcileExhaustedSystemReportClaims(
-    budget: number,
-    execute: boolean,
-    now: Date,
-  ): Promise<CollectionCleanupResult> {
-    const startedAt = Date.now();
-    const filter = this.exhaustedSystemReportFilter(now);
-    const observedEligible = await this.systemReportModel.countDocuments(
-      filter,
-      { limit: budget + 1 },
-    );
-    const planned = Math.min(observedEligible, budget);
-
-    if (!execute || planned === 0) {
-      return this.result(
-        'system_reports_manual_review',
-        observedEligible,
-        planned,
-        startedAt,
-        { truncated: observedEligible > budget },
-      );
-    }
-
-    const candidates = await this.systemReportModel
-      .find(filter)
-      .sort({ updatedAt: 1, _id: 1 })
-      .limit(planned)
-      .select('_id')
-      .lean<{ _id: Types.ObjectId }[]>()
-      .exec();
-    const ids = candidates.map((candidate) => candidate._id);
-    const update = await this.systemReportModel.updateMany(
-      { $and: [filter, { _id: { $in: ids } }] },
-      {
-        $set: {
-          retentionCleanupStatus: RetentionCleanupStatus.MANUAL_REVIEW,
-          retentionLockedUntil: null,
-          retentionLockToken: null,
-          retentionLastError:
-            'Cleanup vượt giới hạn retry và cần kiểm tra thủ công',
-        },
-      },
-    );
-
-    return this.result(
-      'system_reports_manual_review',
-      observedEligible,
-      planned,
-      startedAt,
-      {
-        processed: ids.length,
-        updated: update.modifiedCount,
-        skipped: ids.length - update.modifiedCount,
-        truncated: observedEligible > budget,
-      },
-    );
-  }
-
-  private async cleanupSystemReports(
-    budget: number,
-    execute: boolean,
-    now: Date,
-  ): Promise<CollectionCleanupResult> {
-    const startedAt = Date.now();
-    const eligibility = this.systemReportEligibilityFilter(now);
-    const observedEligible = await this.systemReportModel.countDocuments(
-      eligibility,
-      { limit: budget + 1 },
-    );
-    const planned = Math.min(observedEligible, budget);
-
-    if (!execute || planned === 0) {
-      return this.result(
-        'system_reports',
-        observedEligible,
-        planned,
-        startedAt,
-        { truncated: observedEligible > budget },
-      );
-    }
-
-    let processed = 0;
-    let deleted = 0;
-    let skipped = 0;
-    let failed = 0;
-    let lostOwnership = 0;
-
-    for (let index = 0; index < planned; index += 1) {
-      const outcome = await this.processOneSystemReport(now);
-      if (outcome === 'none') break;
-      processed += 1;
-      if (outcome === 'deleted') deleted += 1;
-      if (outcome === 'skipped') skipped += 1;
-      if (outcome === 'failed') failed += 1;
-      if (outcome === 'lost') lostOwnership += 1;
-    }
-
-    return this.result('system_reports', observedEligible, planned, startedAt, {
-      processed,
-      deleted,
-      skipped,
-      failed,
-      lostOwnership,
-      truncated: observedEligible > budget,
-    });
-  }
-
-  private async processOneSystemReport(
-    now: Date,
-  ): Promise<'deleted' | 'failed' | 'lost' | 'skipped' | 'none'> {
-    const token = randomUUID();
-    const lockedUntil = new Date(now.getTime() + SYSTEM_REPORT_LOCK_MS);
-    const claimed = await this.systemReportModel
-      .findOneAndUpdate(
-        this.systemReportEligibilityFilter(now),
-        {
-          $set: {
-            retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-            retentionLockedUntil: lockedUntil,
-            retentionLockToken: token,
-            retentionLastError: '',
-          },
-          $inc: { retentionAttempts: 1 },
-        },
-        { sort: { terminalAt: 1, _id: 1 }, returnDocument: 'after' },
-      )
-      .select('_id evidenceImages retentionAttempts')
-      .lean<SystemReportCandidate>()
-      .exec();
-
-    if (!claimed) return 'none';
-    if (!token) throw new Error('Không tạo được retention lock token');
-
-    try {
-      const owned = await this.systemReportModel
-        .findOne({
-          _id: claimed._id,
-          ...this.systemReportTerminalFilter(now),
-          retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-          retentionLockToken: token,
-          retentionLockedUntil: { $gt: new Date() },
-        })
-        .select('_id')
-        .lean()
-        .exec();
-
-      if (!owned) return 'lost';
-
-      await this.uploadsService.deleteImages(
-        (claimed.evidenceImages ?? [])
-          .map((image) => image.publicId ?? '')
-          .filter(Boolean),
-        { throwOnError: true },
-      );
-
-      const deletion = await this.systemReportModel.deleteOne({
-        _id: claimed._id,
-        ...this.systemReportTerminalFilter(now),
-        retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-        retentionLockToken: token,
-      });
-
-      return deletion.deletedCount === 1 ? 'deleted' : 'lost';
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      const attempts = claimed.retentionAttempts ?? 1;
-      const finalStatus =
-        attempts >= SYSTEM_REPORT_MAX_ATTEMPTS
-          ? RetentionCleanupStatus.MANUAL_REVIEW
-          : RetentionCleanupStatus.FAILED;
-      const release = await this.systemReportModel.updateOne(
-        {
-          _id: claimed._id,
-          retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-          retentionLockToken: token,
-        },
-        {
-          $set: {
-            retentionCleanupStatus: finalStatus,
-            retentionLockedUntil:
-              finalStatus === RetentionCleanupStatus.FAILED
-                ? new Date(Date.now() + SYSTEM_REPORT_RETRY_DELAY_MS)
-                : null,
-            retentionLockToken: null,
-            retentionLastError: message.slice(0, 2_000),
-          },
-        },
-      );
-
-      return release.modifiedCount === 1 ? 'failed' : 'lost';
-    }
-  }
-
-  private systemReportTerminalFilter(now: Date): SystemReportFilter {
-    return {
-      status: { $in: [SystemReportStatus.FIXED, SystemReportStatus.CLOSED] },
-      terminalAt: {
-        $lt: this.cutoff(now, RETENTION_DAYS.systemReports),
-      },
-    };
-  }
-
-  private systemReportEligibilityFilter(now: Date): SystemReportFilter {
-    return {
-      ...this.systemReportTerminalFilter(now),
-      $and: [
-        {
-          $or: [
-            { retentionAttempts: { $lt: SYSTEM_REPORT_MAX_ATTEMPTS } },
-            { retentionAttempts: { $exists: false } },
-          ],
-        },
-        {
-          $or: [
-            { retentionCleanupStatus: RetentionCleanupStatus.PENDING },
-            { retentionCleanupStatus: { $exists: false } },
-            {
-              retentionCleanupStatus: RetentionCleanupStatus.FAILED,
-              retentionLockedUntil: { $lte: now },
-            },
-            {
-              retentionCleanupStatus: RetentionCleanupStatus.FAILED,
-              retentionLockedUntil: null,
-            },
-            {
-              retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-              retentionLockedUntil: { $lte: now },
-            },
-            {
-              retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-              retentionLockedUntil: null,
-            },
-          ],
-        },
-      ],
-    };
-  }
-
-  private exhaustedSystemReportFilter(now: Date): SystemReportFilter {
-    return {
-      ...this.systemReportTerminalFilter(now),
-      retentionAttempts: { $gte: SYSTEM_REPORT_MAX_ATTEMPTS },
-      $or: [
-        { retentionCleanupStatus: RetentionCleanupStatus.FAILED },
-        {
-          retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-          retentionLockedUntil: { $lte: now },
-        },
-        {
-          retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-          retentionLockedUntil: null,
-        },
-        {
-          retentionCleanupStatus: RetentionCleanupStatus.PROCESSING,
-          retentionLockedUntil: { $exists: false },
-        },
-      ],
-    };
-  }
-
   private result(
     collection: string,
     eligible: number,
@@ -769,6 +506,7 @@ export class DataRetentionService {
       skipped: 0,
       failed: 0,
       lostOwnership: 0,
+      manualReview: 0,
       truncated: false,
       durationMs: Date.now() - startedAt,
       ...values,
@@ -793,9 +531,19 @@ export class DataRetentionService {
     mode: CleanupMode,
     execute: boolean,
     confirmation?: string,
+    backupReference?: string,
   ): void {
     if (mode === 'test-marker' && process.env.NODE_ENV === 'production') {
       throw new Error('Không được cleanup test marker trong production');
+    }
+    if (
+      execute &&
+      mode === 'retention' &&
+      !BACKUP_REFERENCE_PATTERN.test(backupReference ?? '')
+    ) {
+      throw new Error(
+        'Retention execute yêu cầu --backup-reference hợp lệ (8..128 ký tự an toàn)',
+      );
     }
     if (
       execute &&
@@ -820,12 +568,18 @@ export class DataRetentionService {
 
   private sum(
     results: CollectionCleanupResult[],
-    field: 'processed' | 'updated' | 'deleted' | 'failed' | 'lostOwnership',
+    field:
+      | 'processed'
+      | 'updated'
+      | 'deleted'
+      | 'failed'
+      | 'lostOwnership'
+      | 'manualReview',
   ): number {
     return results.reduce((total, result) => total + result[field], 0);
   }
 
-  private logSummary(result: DataRetentionResult, lostOwnership: number): void {
+  private logSummary(result: DataRetentionResult): void {
     const summary = [
       'Retention cleanup completed',
       `mode=${result.mode}`,
@@ -835,11 +589,13 @@ export class DataRetentionService {
       `updated=${result.updated}`,
       `deleted=${result.deleted}`,
       `failed=${result.failed}`,
-      `lostOwnership=${lostOwnership}`,
+      `lostOwnership=${result.lostOwnership}`,
+      `manualReview=${result.manualReview}`,
+      `requiresIntervention=${result.requiresIntervention}`,
       `hasMore=${result.hasMore}`,
     ].join(' ');
 
-    if (result.failed > 0) this.logger.error(summary);
+    if (result.requiresIntervention) this.logger.error(summary);
     else if (result.hasMore) this.logger.warn(summary);
     else this.logger.log(summary);
   }

@@ -1,7 +1,21 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { Post, PostCleanupStatus } from '../../posts/schemas/post.schema';
+import { randomUUID } from 'node:crypto';
+import {
+  Post,
+  PostCleanupStatus,
+  PostModerationState,
+} from '../../posts/schemas/post.schema';
+import {
+  Report,
+  ReportStatus,
+  ReportTargetType,
+} from '../../reports/schemas/report.schema';
+import {
+  ADMIN_POLICY,
+  type AdminPolicy,
+} from '../../admin/config/admin-policy.config';
 import { User } from '../../users/schemas/user.schema';
 import { UploadsService } from '../../uploads/services/uploads.service';
 
@@ -10,7 +24,16 @@ type ExpiredPostCleanupTarget = {
   publicId: string;
   authorId: Types.ObjectId;
   images: { url: string; publicId: string }[];
+  moderationState: PostModerationState;
+  moderationVersion: number;
+  moderationNoticeVersion: number;
+  evidenceHoldUntil: Date | null;
+  cleanupLockToken: string;
 };
+
+type StoredRetentionHold = Readonly<{
+  retentionHold?: Readonly<{ expiresAt?: Date | null }> | null;
+}>;
 
 @Injectable()
 export class ExpiredPostCleanupService {
@@ -26,6 +49,12 @@ export class ExpiredPostCleanupService {
     @InjectModel(User.name)
     private readonly userModel: Model<User>,
     private readonly uploadsService: UploadsService,
+    @Optional()
+    @InjectModel(Report.name)
+    private readonly reportModel?: Model<Report>,
+    @Optional()
+    @Inject(ADMIN_POLICY)
+    private readonly policy?: AdminPolicy,
   ) {}
 
   async cleanupExpiredPosts(): Promise<{
@@ -45,11 +74,13 @@ export class ExpiredPostCleanupService {
       processed += 1;
 
       try {
-        await this.cleanupOnePost(post);
-        deleted += 1;
+        if (!(await this.isEvidenceReleased(post))) {
+          continue;
+        }
+        if (await this.cleanupOnePost(post)) deleted += 1;
       } catch (error) {
         failed += 1;
-        await this.markCleanupFailed(post._id, error);
+        await this.markCleanupFailed(post, error);
       }
     }
 
@@ -65,12 +96,46 @@ export class ExpiredPostCleanupService {
   private async claimNextExpiredPost(): Promise<ExpiredPostCleanupTarget | null> {
     const now = new Date();
     const lockUntil = new Date(now.getTime() + this.lockMs);
+    const lockToken = randomUUID();
 
     return this.postModel
       .findOneAndUpdate(
         {
-          expireAt: { $lte: now },
           $and: [
+            {
+              $or: [
+                { cleanupDestructiveStartedAt: null },
+                { cleanupDestructiveStartedAt: { $exists: false } },
+              ],
+            },
+            {
+              $or: [
+                {
+                  expireAt: { $lte: now },
+                  moderationState: {
+                    $ne: PostModerationState.TERMINAL_DELETED,
+                  },
+                },
+                {
+                  moderationState: PostModerationState.TERMINAL_DELETED,
+                },
+              ],
+            },
+            {
+              $expr: {
+                $gte: [
+                  { $ifNull: ['$moderationNoticeVersion', 0] },
+                  { $ifNull: ['$moderationVersion', 0] },
+                ],
+              },
+            },
+            {
+              $or: [
+                { evidenceHoldUntil: null },
+                { evidenceHoldUntil: { $exists: false } },
+                { evidenceHoldUntil: { $lte: now } },
+              ],
+            },
             {
               $or: [
                 { cleanupAttempts: { $lt: this.maxAttempts } },
@@ -95,6 +160,7 @@ export class ExpiredPostCleanupService {
           $set: {
             cleanupStatus: PostCleanupStatus.PROCESSING,
             cleanupLockedUntil: lockUntil,
+            cleanupLockToken: lockToken,
             cleanupLastError: null,
           },
           $inc: {
@@ -103,12 +169,17 @@ export class ExpiredPostCleanupService {
         },
         {
           sort: { expireAt: 1 },
-          new: true,
+          returnDocument: 'after',
           projection: {
             _id: 1,
             publicId: 1,
             authorId: 1,
             images: 1,
+            moderationState: 1,
+            moderationVersion: 1,
+            moderationNoticeVersion: 1,
+            evidenceHoldUntil: 1,
+            cleanupLockToken: 1,
           },
         },
       )
@@ -116,7 +187,11 @@ export class ExpiredPostCleanupService {
       .exec();
   }
 
-  private async cleanupOnePost(post: ExpiredPostCleanupTarget): Promise<void> {
+  private async cleanupOnePost(
+    post: ExpiredPostCleanupTarget,
+  ): Promise<boolean> {
+    if (!(await this.isEvidenceReleased(post))) return false;
+    if (!(await this.reservePhysicalDeletion(post))) return false;
     const imagePublicIds = post.images
       .map((image) => image.publicId)
       .filter(Boolean);
@@ -131,6 +206,8 @@ export class ExpiredPostCleanupService {
       .deleteOne({
         _id: post._id,
         cleanupStatus: PostCleanupStatus.PROCESSING,
+        cleanupLockToken: post.cleanupLockToken,
+        cleanupDestructiveStartedAt: { $type: 'date' },
       })
       .exec();
 
@@ -141,6 +218,149 @@ export class ExpiredPostCleanupService {
     }
 
     await this.decrementAuthorPostCount(post.authorId, post.publicId);
+    return true;
+  }
+
+  private async reservePhysicalDeletion(
+    post: ExpiredPostCleanupTarget,
+  ): Promise<boolean> {
+    const now = new Date();
+    const result = await this.postModel.updateOne(
+      {
+        _id: post._id,
+        cleanupStatus: PostCleanupStatus.PROCESSING,
+        cleanupLockToken: post.cleanupLockToken,
+        cleanupLockedUntil: { $gt: now },
+        $or: [
+          { cleanupDestructiveStartedAt: null },
+          { cleanupDestructiveStartedAt: { $exists: false } },
+        ],
+        $and: [
+          {
+            $or: [
+              { evidenceHoldUntil: null },
+              { evidenceHoldUntil: { $exists: false } },
+              { evidenceHoldUntil: { $lte: now } },
+            ],
+          },
+          {
+            $expr: {
+              $gte: [
+                { $ifNull: ['$moderationNoticeVersion', 0] },
+                { $ifNull: ['$moderationVersion', 0] },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        $set: {
+          cleanupDestructiveStartedAt: now,
+          cleanupLockedUntil: new Date(now.getTime() + this.lockMs),
+        },
+      },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  private async isEvidenceReleased(
+    post: ExpiredPostCleanupTarget,
+  ): Promise<boolean> {
+    if (!this.reportModel || !this.policy) return true;
+    const now = new Date();
+    const [openReport, heldReport] = await Promise.all([
+      this.reportModel.exists({
+        targetType: ReportTargetType.POST,
+        targetId: post._id,
+        status: { $in: [ReportStatus.PENDING, ReportStatus.REVIEWING] },
+      }),
+      this.reportModel
+        .findOne({
+          targetType: ReportTargetType.POST,
+          targetId: post._id,
+          retentionHold: { $ne: null },
+          $or: [
+            { 'retentionHold.expiresAt': { $gt: now } },
+            { 'retentionHold.expiresAt': null },
+            { 'retentionHold.expiresAt': { $exists: false } },
+          ],
+        })
+        .sort({ 'retentionHold.expiresAt': -1, _id: 1 })
+        .select('+retentionHold')
+        .lean<StoredRetentionHold | null>()
+        .exec(),
+    ]);
+    const explicitHoldUntil = heldReport?.retentionHold?.expiresAt;
+    const failClosedHoldUntil =
+      explicitHoldUntil instanceof Date
+        ? explicitHoldUntil
+        : heldReport
+          ? new Date(now.getTime() + this.lockMs)
+          : null;
+    if (openReport) {
+      await this.deferForEvidence(
+        post,
+        this.latestDate(
+          new Date(now.getTime() + this.lockMs),
+          failClosedHoldUntil,
+        ),
+      );
+      return false;
+    }
+
+    const latestTerminal = await this.reportModel
+      .findOne({
+        targetType: ReportTargetType.POST,
+        targetId: post._id,
+        status: { $in: [ReportStatus.RESOLVED, ReportStatus.REJECTED] },
+        terminalAt: { $type: 'date' },
+      })
+      .sort({ terminalAt: -1 })
+      .select('_id terminalAt')
+      .lean<{ terminalAt: Date } | null>()
+      .exec();
+    const graceHoldUntil = latestTerminal
+      ? new Date(
+          latestTerminal.terminalAt.getTime() +
+            this.policy.retention.reportEvidenceGraceDays * 86_400_000,
+        )
+      : null;
+    const holdUntil = this.latestDate(graceHoldUntil, failClosedHoldUntil);
+    if (!holdUntil) return true;
+    if (holdUntil.getTime() <= now.getTime()) return true;
+    await this.deferForEvidence(post, holdUntil);
+    return false;
+  }
+
+  private latestDate(first: Date | null, second: Date | null): Date | null {
+    if (!first) return second;
+    if (!second) return first;
+    return first.getTime() >= second.getTime() ? first : second;
+  }
+
+  private async deferForEvidence(
+    post: ExpiredPostCleanupTarget,
+    holdUntil: Date | null,
+  ): Promise<void> {
+    await this.postModel
+      .updateOne(
+        {
+          _id: post._id,
+          cleanupStatus: PostCleanupStatus.PROCESSING,
+          cleanupLockToken: post.cleanupLockToken,
+        },
+        {
+          $set: {
+            cleanupStatus: PostCleanupStatus.PENDING,
+            cleanupLockedUntil: null,
+            cleanupLockToken: null,
+            cleanupLastError: null,
+            evidenceHoldUntil: holdUntil,
+          },
+          $inc: { cleanupAttempts: -1 },
+        },
+      )
+      .exec();
   }
 
   private async decrementAuthorPostCount(
@@ -163,23 +383,52 @@ export class ExpiredPostCleanupService {
   }
 
   private async markCleanupFailed(
-    postId: Types.ObjectId,
+    post: ExpiredPostCleanupTarget,
     error: unknown,
   ): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
 
     this.logger.error(
-      `Expired post cleanup failed for post=${postId.toString()}: ${message}`,
+      `Expired post cleanup failed for post=${post.publicId}: ${message}`,
       error instanceof Error ? error.stack : undefined,
     );
 
+    const manualReview = await this.postModel
+      .updateOne(
+        {
+          _id: post._id,
+          cleanupStatus: PostCleanupStatus.PROCESSING,
+          cleanupLockToken: post.cleanupLockToken,
+          cleanupDestructiveStartedAt: { $type: 'date' },
+        },
+        {
+          $set: {
+            cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
+            cleanupLockedUntil: null,
+            cleanupLockToken: null,
+            cleanupLastError: message.slice(0, 500),
+          },
+        },
+      )
+      .exec();
+    if (manualReview.modifiedCount === 1) return;
+
     await this.postModel
       .updateOne(
-        { _id: postId },
+        {
+          _id: post._id,
+          cleanupStatus: PostCleanupStatus.PROCESSING,
+          cleanupLockToken: post.cleanupLockToken,
+          $or: [
+            { cleanupDestructiveStartedAt: null },
+            { cleanupDestructiveStartedAt: { $exists: false } },
+          ],
+        },
         {
           $set: {
             cleanupStatus: PostCleanupStatus.FAILED,
             cleanupLockedUntil: null,
+            cleanupLockToken: null,
             cleanupLastError: message.slice(0, 500),
           },
         },

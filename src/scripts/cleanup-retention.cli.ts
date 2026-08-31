@@ -5,6 +5,7 @@ export type RetentionCliOptions = {
   mode: CleanupMode;
   maxDocuments?: number;
   confirmation?: string;
+  backupReference?: string;
 };
 
 const parsePositiveInteger = (value: string, option: string): number => {
@@ -53,6 +54,11 @@ export const parseRetentionArguments = (
     }
     if (argument === '--confirm') {
       options.confirmation = readValue(args, index, argument);
+      index += 1;
+      continue;
+    }
+    if (argument === '--backup-reference') {
+      options.backupReference = readValue(args, index, argument);
       index += 1;
       continue;
     }

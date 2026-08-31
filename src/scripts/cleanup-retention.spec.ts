@@ -19,12 +19,15 @@ describe('cleanup-retention CLI', () => {
         '25',
         '--confirm',
         'confirmation',
+        '--backup-reference',
+        'atlas-backup-20260829',
       ]),
     ).toEqual({
       execute: true,
       mode: 'test-marker',
       maxDocuments: 25,
       confirmation: 'confirmation',
+      backupReference: 'atlas-backup-20260829',
     });
   });
 
