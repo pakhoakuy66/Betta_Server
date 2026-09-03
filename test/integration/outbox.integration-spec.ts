@@ -22,6 +22,10 @@ import {
   OutboxEventSchema,
 } from '../../src/common/outbox/outbox-event.schema';
 import { OutboxHandlerRegistry } from '../../src/common/outbox/outbox-handler.registry';
+import {
+  OutboxPermanentError,
+  OutboxRetryLaterError,
+} from '../../src/common/outbox/outbox.errors';
 import { OutboxProcessorService } from '../../src/common/outbox/outbox-processor.service';
 import { OutboxService } from '../../src/common/outbox/outbox.service';
 
@@ -167,6 +171,7 @@ describe('Transactional outbox MongoDB integration', () => {
     let calls = 0;
     registry.register({
       eventType: 'notification.test_requested',
+      handlerId: 'notification.test.delivery.v1',
       handle: () => {
         calls += 1;
         return Promise.resolve();
@@ -194,7 +199,7 @@ describe('Transactional outbox MongoDB integration', () => {
     });
   });
 
-  it('reclaims an expired lease with the same event identity', async () => {
+  it('reclaims below the retry ceiling and dead-letters an exhausted lease', async () => {
     const publicId = await enqueue();
     const firstClaimAt = new Date(Date.now() + 1_000);
     const first = await outbox.claim(firstClaimAt, 1_000);
@@ -212,6 +217,33 @@ describe('Transactional outbox MongoDB integration', () => {
       dedupeKey: first?.event.dedupeKey,
       attempt: 2,
     });
+
+    const exhaustedAt = new Date(firstClaimAt.getTime() + 2_002);
+    await model.collection.updateOne(
+      { publicId },
+      {
+        $set: {
+          attempt: OUTBOX_MAX_ATTEMPTS,
+          leaseExpiresAt: new Date(exhaustedAt.getTime() - 1),
+        },
+      },
+    );
+
+    await expect(outbox.reconcileExpiredLeases(exhaustedAt, 1)).resolves.toBe(
+      1,
+    );
+    const exhausted = await model.collection.findOne({ publicId });
+    expect(exhausted).toMatchObject({
+      status: OutboxStatus.DEAD_LETTER,
+      attempt: OUTBOX_MAX_ATTEMPTS,
+      leaseId: null,
+      leaseExpiresAt: null,
+      lastErrorCode: 'MAX_ATTEMPTS_EXHAUSTED',
+    });
+    expect(exhausted?.retentionExpiresAt).toBeInstanceOf(Date);
+    await expect(
+      outbox.claim(new Date(exhaustedAt.getTime() + 1), 1_000),
+    ).resolves.toBeNull();
   });
 
   it('retries a failed handler and then publishes with the same idempotency key', async () => {
@@ -220,6 +252,7 @@ describe('Transactional outbox MongoDB integration', () => {
     let fail = true;
     registry.register({
       eventType: 'notification.test_requested',
+      handlerId: 'notification.test.retry.v1',
       handle: (event) => {
         receivedKeys.push(event.dedupeKey);
         if (fail) {
@@ -263,6 +296,7 @@ describe('Transactional outbox MongoDB integration', () => {
     );
     registry.register({
       eventType: 'notification.test_requested',
+      handlerId: 'notification.test.poison.v1',
       handle: () =>
         Promise.reject(new Error('sensitive stack must not be persisted')),
     });
@@ -316,6 +350,146 @@ describe('Transactional outbox MongoDB integration', () => {
       processing: 1,
       deadLetter: 1,
       oldestPendingAt: oldestAt.toISOString(),
+    });
+  });
+
+  it('checkpoints ordered handlers and publishes only after every handler', async () => {
+    const publicId = await enqueue();
+    const calls: string[] = [];
+    registry.register({
+      eventType: 'notification.test_requested',
+      handlerId: 'notification.test.second.v1',
+      order: 200,
+      handle: () => {
+        calls.push('second');
+        return Promise.resolve();
+      },
+    });
+    registry.register({
+      eventType: 'notification.test_requested',
+      handlerId: 'notification.test.first.v1',
+      order: 100,
+      handle: () => {
+        calls.push('first');
+        return Promise.resolve();
+      },
+    });
+    const processor = new OutboxProcessorService(
+      outbox,
+      registry,
+      new ConfigService(),
+    );
+
+    await processor.drain(1);
+
+    expect(calls).toStrictEqual(['first', 'second']);
+    await expect(
+      model.findOne({ publicId }).lean().exec(),
+    ).resolves.toMatchObject({
+      status: OutboxStatus.PUBLISHED,
+      completedHandlerIds: [
+        'notification.test.first.v1',
+        'notification.test.second.v1',
+      ],
+    });
+  });
+
+  it('reconciles an abandoned lease after a worker crash', async () => {
+    const publicId = await enqueue();
+    const claimed = await outbox.claim(new Date(), 3_000);
+    expect(claimed?.event.publicId).toBe(publicId);
+    await model.updateOne(
+      { publicId },
+      { $set: { leaseExpiresAt: new Date(0) } },
+    );
+    let calls = 0;
+    registry.register({
+      eventType: 'notification.test_requested',
+      handlerId: 'notification.test.recovered.v1',
+      handle: () => {
+        calls += 1;
+        return Promise.resolve();
+      },
+    });
+    const processor = new OutboxProcessorService(
+      outbox,
+      registry,
+      new ConfigService(),
+    );
+
+    await processor.drain(1);
+
+    expect(calls).toBe(1);
+    await expect(
+      model.findOne({ publicId }).lean().exec(),
+    ).resolves.toMatchObject({
+      status: OutboxStatus.PUBLISHED,
+      attempt: 2,
+    });
+  });
+
+  it('dead-letters a permanent side-effect failure without retrying', async () => {
+    const publicId = await enqueue();
+    registry.register({
+      eventType: 'notification.test_requested',
+      handlerId: 'notification.test.permanent.v1',
+      handle: () =>
+        Promise.reject(
+          new OutboxPermanentError(
+            'INVALID_NOTIFICATION_EVENT',
+            'invalid fixture',
+          ),
+        ),
+    });
+    const processor = new OutboxProcessorService(
+      outbox,
+      registry,
+      new ConfigService(),
+    );
+
+    await processor.drain(1);
+
+    await expect(
+      model.findOne({ publicId }).lean().exec(),
+    ).resolves.toMatchObject({
+      status: OutboxStatus.DEAD_LETTER,
+      attempt: 1,
+      lastErrorCode: 'INVALID_NOTIFICATION_EVENT',
+    });
+  });
+
+  it('reschedules an owned domain operation without consuming retry budget', async () => {
+    const publicId = await enqueue();
+    const retryAt = new Date(Date.now() + 5 * 60 * 1_000);
+    registry.register({
+      eventType: 'notification.test_requested',
+      handlerId: 'notification.test.deferred.v1',
+      handle: () =>
+        Promise.reject(
+          new OutboxRetryLaterError(
+            'DOMAIN_OPERATION_IN_PROGRESS',
+            'owned by another worker',
+            retryAt,
+          ),
+        ),
+    });
+    const processor = new OutboxProcessorService(
+      outbox,
+      registry,
+      new ConfigService(),
+    );
+
+    await processor.drain(1);
+
+    await expect(
+      model.findOne({ publicId }).lean().exec(),
+    ).resolves.toMatchObject({
+      status: OutboxStatus.PENDING,
+      attempt: 0,
+      availableAt: retryAt,
+      lastErrorCode: 'DOMAIN_OPERATION_IN_PROGRESS',
+      leaseId: null,
+      leaseExpiresAt: null,
     });
   });
 });

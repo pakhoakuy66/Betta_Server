@@ -628,6 +628,7 @@ export class AdminReportDecisionService {
         targetType: report.targetType,
         targetPublicId,
         terminalAt: terminalAt.toISOString(),
+        reportVersion,
       },
       correlationId: input.correlationId,
       mongoSession: session,

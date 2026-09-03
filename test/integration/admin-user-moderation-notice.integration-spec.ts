@@ -19,9 +19,18 @@ import { OutboxProcessorService } from '../../src/common/outbox/outbox-processor
 import { OutboxService } from '../../src/common/outbox/outbox.service';
 import { OutboxStatus } from '../../src/common/outbox/outbox.constants';
 import {
+  ADMIN_USER_DELETION_EVENT_TYPE,
+  AdminUserDeletionOperation,
+} from '../../src/modules/admin/constants/admin-user-deletion.constants';
+import {
   ADMIN_USER_RESTRICTION_EVENT_TYPE,
   AdminUserRestrictionOperation,
 } from '../../src/modules/admin/constants/admin-user-restriction.constants';
+import {
+  AuthSession,
+  AuthSessionSchema,
+  SessionRevokeReason,
+} from '../../src/modules/auth/schemas/auth-session.schema';
 import {
   Notification,
   NotificationSchema,
@@ -30,7 +39,10 @@ import {
 } from '../../src/modules/notifications/schemas/notifications.schema';
 import { NotificationsService } from '../../src/modules/notifications/services/notifications.service';
 import { Post, PostSchema } from '../../src/modules/posts/schemas/post.schema';
-import { UserRestrictionType } from '../../src/modules/users/constants/user-moderation.constants';
+import {
+  UserDeletionOrigin,
+  UserRestrictionType,
+} from '../../src/modules/users/constants/user-moderation.constants';
 import {
   USER_MODERATION_NOTICE_RETENTION_INDEX,
   USER_MODERATION_NOTICE_SOURCE_EVENT_INDEX,
@@ -44,7 +56,9 @@ import {
 import { User, UserSchema } from '../../src/modules/users/schemas/user.schema';
 import {
   UserDeletionChangedHandler,
+  UserDeletionSessionRevocationHandler,
   UserRestrictionChangedHandler,
+  UserRestrictionSessionRevocationHandler,
 } from '../../src/modules/users/services/user-moderation-notice.handlers';
 import { UserModerationNoticeService } from '../../src/modules/users/services/user-moderation-notice.service';
 
@@ -63,6 +77,7 @@ describe('User moderation notice MongoDB integration', () => {
   let notices: Model<UserModerationNotice>;
   let notifications: Model<Notification>;
   let posts: Model<Post>;
+  let sessions: Model<AuthSession>;
   let events: Model<OutboxEvent>;
   let outbox: OutboxService;
   let processor: OutboxProcessorService;
@@ -93,12 +108,14 @@ describe('User moderation notice MongoDB integration', () => {
       NotificationSchema.clone(),
     );
     posts = connection.model(Post.name, PostSchema.clone());
+    sessions = connection.model(AuthSession.name, AuthSessionSchema.clone());
     events = connection.model(OutboxEvent.name, OutboxEventSchema.clone());
     await Promise.all([
       users.syncIndexes(),
       notices.syncIndexes(),
       notifications.syncIndexes(),
       posts.syncIndexes(),
+      sessions.syncIndexes(),
       events.syncIndexes(),
     ]);
 
@@ -112,8 +129,18 @@ describe('User moderation notice MongoDB integration', () => {
       notices,
       users,
       notificationService,
+      undefined,
+      sessions,
     );
     const registry = new OutboxHandlerRegistry();
+    new UserRestrictionSessionRevocationHandler(
+      registry,
+      noticeService,
+    ).onModuleInit();
+    new UserDeletionSessionRevocationHandler(
+      registry,
+      noticeService,
+    ).onModuleInit();
     new UserRestrictionChangedHandler(registry, noticeService).onModuleInit();
     new UserDeletionChangedHandler(registry, noticeService).onModuleInit();
     processor = new OutboxProcessorService(
@@ -128,6 +155,7 @@ describe('User moderation notice MongoDB integration', () => {
       users.collection.deleteMany({}),
       notices.collection.deleteMany({}),
       notifications.collection.deleteMany({}),
+      sessions.collection.deleteMany({}),
       events.collection.deleteMany({}),
     ]);
     await users.create({
@@ -159,6 +187,30 @@ describe('User moderation notice MongoDB integration', () => {
     try {
       let publicId = '';
       await session.withTransaction(async () => {
+        const effectiveAt = new Date('2026-08-20T01:00:00.000Z');
+        const expiresAt = new Date('2026-08-21T01:00:00.000Z');
+        await users.updateOne(
+          { publicId: 'usr_23456789AB' },
+          {
+            $set: {
+              version,
+              authzVersion: version,
+              isDeleted: false,
+              status: 'active',
+              restriction:
+                operation === AdminUserRestrictionOperation.APPLY
+                  ? {
+                      type: UserRestrictionType.TEMPORARY_SUSPENSION,
+                      effectiveAt,
+                      expiresAt,
+                      supportReference: 'sup_23456789ABCD',
+                      publicReasonCode: 'community_policy_review',
+                    }
+                  : null,
+            },
+          },
+          { session },
+        );
         publicId = await outbox.enqueue({
           eventType: ADMIN_USER_RESTRICTION_EVENT_TYPE,
           dedupeKey: `user-restriction:usr_23456789AB:${version}`,
@@ -173,8 +225,8 @@ describe('User moderation notice MongoDB integration', () => {
               operation === AdminUserRestrictionOperation.APPLY
                 ? {
                     type: UserRestrictionType.TEMPORARY_SUSPENSION,
-                    effectiveAt: '2026-08-20T01:00:00.000Z',
-                    expiresAt: '2026-08-21T01:00:00.000Z',
+                    effectiveAt: effectiveAt.toISOString(),
+                    expiresAt: expiresAt.toISOString(),
                     supportReference: 'sup_23456789ABCD',
                     publicReasonCode: 'community_policy_review',
                   }
@@ -189,6 +241,75 @@ describe('User moderation notice MongoDB integration', () => {
     } finally {
       await session.endSession();
     }
+  };
+
+  const enqueueDeletion = async (version: number): Promise<string> => {
+    const session = await connection.startSession();
+    try {
+      let publicId = '';
+      await session.withTransaction(async () => {
+        const deletedAt = new Date('2026-08-20T01:00:00.000Z');
+        const restorableUntil = new Date('2026-09-19T01:00:00.000Z');
+        await users.updateOne(
+          { publicId: 'usr_23456789AB' },
+          {
+            $set: {
+              version,
+              authzVersion: version,
+              isDeleted: true,
+              deletionOrigin: UserDeletionOrigin.ADMIN_MODERATION,
+              deletedAt,
+              restorableUntil,
+            },
+          },
+          { session },
+        );
+        publicId = await outbox.enqueue({
+          eventType: ADMIN_USER_DELETION_EVENT_TYPE,
+          dedupeKey: `user-deletion:usr_23456789AB:${version}`,
+          aggregateType: 'user',
+          aggregatePublicId: 'usr_23456789AB',
+          payload: {
+            schemaVersion: 1,
+            operation: AdminUserDeletionOperation.DELETE,
+            userPublicId: 'usr_23456789AB',
+            deletion: {
+              isDeleted: true,
+              deletionOrigin: UserDeletionOrigin.ADMIN_MODERATION,
+              deletedAt: deletedAt.toISOString(),
+              restorableUntil: restorableUntil.toISOString(),
+            },
+            beforeVersion: version - 1,
+            afterVersion: version,
+          },
+          mongoSession: session,
+        });
+      });
+      return publicId;
+    } finally {
+      await session.endSession();
+    }
+  };
+
+  const createSessionAfter = async (
+    userId: unknown,
+    suffix: string,
+    createdAt: Date,
+  ): Promise<void> => {
+    await sessions.collection.insertOne({
+      userId,
+      publicId: `ses_stale_event_${suffix.padEnd(16, '0')}`,
+      tokenFamily: `family_stale_event_${suffix.padEnd(14, '0')}`,
+      tokenVersion: 0,
+      refreshTokenHash: `hash_${suffix.padEnd(24, '0')}`,
+      deviceLabel: 'Stale event regression',
+      lastUsedAt: createdAt,
+      expiresAt: new Date(createdAt.getTime() + 86_400_000),
+      revokedAt: null,
+      revokeReason: null,
+      createdAt,
+      updatedAt: createdAt,
+    });
   };
 
   it('creates required unique and retention indexes and rejects mutation', async () => {
@@ -219,16 +340,20 @@ describe('User moderation notice MongoDB integration', () => {
   });
 
   it('publishes APPLY only after storing one safe durable notice', async () => {
+    const user = await users.findOne({ publicId: 'usr_23456789AB' }).exec();
+    if (!user) throw new Error('Missing APPLY target fixture');
+    await createSessionAfter(user._id, 'apply-current', new Date());
     const eventPublicId = await enqueueRestriction(
       AdminUserRestrictionOperation.APPLY,
       1,
     );
     await expect(processor.drain()).resolves.toBe(1);
 
-    const [event, notice, notificationCount] = await Promise.all([
+    const [event, notice, notificationCount, session] = await Promise.all([
       events.findOne({ publicId: eventPublicId }).lean().exec(),
       notices.findOne({ sourceEventPublicId: eventPublicId }).lean().exec(),
       notifications.countDocuments({}).exec(),
+      sessions.findOne({ userId: user._id }).lean().exec(),
     ]);
     expect(event?.status).toBe(OutboxStatus.PUBLISHED);
     expect(notice).toMatchObject({
@@ -242,6 +367,32 @@ describe('User moderation notice MongoDB integration', () => {
       /actor|reasonNote|evidence|password|token/iu,
     );
     expect(notificationCount).toBe(0);
+    expect(session).toMatchObject({
+      revokedAt: expect.any(Date),
+      revokeReason: SessionRevokeReason.ACCOUNT_RESTRICTED,
+    });
+  });
+
+  it('revokes active sessions for a current DELETE and stays idempotent', async () => {
+    const user = await users.findOne({ publicId: 'usr_23456789AB' }).exec();
+    if (!user) throw new Error('Missing DELETE target fixture');
+    await createSessionAfter(user._id, 'delete-current', new Date());
+    const eventPublicId = await enqueueDeletion(1);
+
+    await expect(processor.drain(1)).resolves.toBe(1);
+    await expect(processor.drain(1)).resolves.toBe(0);
+
+    const [event, session, sessionCount] = await Promise.all([
+      events.findOne({ publicId: eventPublicId }).lean().exec(),
+      sessions.findOne({ userId: user._id }).lean().exec(),
+      sessions.countDocuments({ userId: user._id }).exec(),
+    ]);
+    expect(event?.status).toBe(OutboxStatus.PUBLISHED);
+    expect(session).toMatchObject({
+      revokedAt: expect.any(Date),
+      revokeReason: SessionRevokeReason.ACCOUNT_DELETED,
+    });
+    expect(sessionCount).toBe(1);
   });
 
   it('is idempotent and creates one mandatory notification on REMOVE', async () => {
@@ -297,5 +448,76 @@ describe('User moderation notice MongoDB integration', () => {
     expect(notice.retentionExpiresAt.getTime()).toBeGreaterThan(
       notification.expiresAt.getTime(),
     );
+  });
+
+  it('does not let delayed APPLY revoke a session created after REMOVE', async () => {
+    const eventPublicId = await enqueueRestriction(
+      AdminUserRestrictionOperation.APPLY,
+      1,
+    );
+    const event = await events
+      .findOne({ publicId: eventPublicId })
+      .lean()
+      .exec();
+    const user = await users.findOne({ publicId: 'usr_23456789AB' }).exec();
+    if (!event || !user) throw new Error('Missing stale restriction fixture');
+    await users.collection.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          version: 2,
+          authzVersion: 2,
+          restriction: null,
+          status: 'active',
+          isDeleted: false,
+        },
+      },
+    );
+    const createdAt = new Date(event.occurredAt.getTime() + 1_000);
+    await createSessionAfter(user._id, 'restriction', createdAt);
+
+    await processor.drain(1);
+
+    await expect(
+      sessions.findOne({ userId: user._id }).lean().exec(),
+    ).resolves.toMatchObject({ revokedAt: null, revokeReason: null });
+    await expect(
+      events.findOne({ publicId: eventPublicId }).lean().exec(),
+    ).resolves.toMatchObject({ status: OutboxStatus.PUBLISHED });
+  });
+
+  it('does not let delayed DELETE revoke a session created after RESTORE', async () => {
+    const eventPublicId = await enqueueDeletion(1);
+    const event = await events
+      .findOne({ publicId: eventPublicId })
+      .lean()
+      .exec();
+    const user = await users.findOne({ publicId: 'usr_23456789AB' }).exec();
+    if (!event || !user) throw new Error('Missing stale deletion fixture');
+    await users.collection.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          version: 2,
+          authzVersion: 2,
+          isDeleted: false,
+          status: 'active',
+          deletionOrigin: null,
+          deletedAt: null,
+          restorableUntil: null,
+        },
+      },
+    );
+    const createdAt = new Date(event.occurredAt.getTime() + 1_000);
+    await createSessionAfter(user._id, 'deletion', createdAt);
+
+    await processor.drain(1);
+
+    await expect(
+      sessions.findOne({ userId: user._id }).lean().exec(),
+    ).resolves.toMatchObject({ revokedAt: null, revokeReason: null });
+    await expect(
+      events.findOne({ publicId: eventPublicId }).lean().exec(),
+    ).resolves.toMatchObject({ status: OutboxStatus.PUBLISHED });
   });
 });

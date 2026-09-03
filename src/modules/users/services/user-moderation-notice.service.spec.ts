@@ -15,6 +15,12 @@ const target = {
   publicId: 'usr_23456789AB',
   isDeleted: false,
   status: 'active',
+  version: 1,
+  deletionOrigin: null,
+  restriction: {
+    type: UserRestrictionType.TEMPORARY_SUSPENSION,
+    effectiveAt: new Date('2026-08-20T01:00:00.000Z'),
+  },
 };
 
 const query = (result: unknown) => {
@@ -62,10 +68,11 @@ const restrictionEvent = (
   },
   attempt: 1,
   occurredAt: new Date('2026-08-20T01:00:00.000Z'),
+  completedHandlerIds: [],
 });
 
-const context = () => {
-  const users = { findOne: jest.fn(() => query(target)) };
+const context = (userTarget: unknown = target) => {
+  const users = { findOne: jest.fn(() => query(userTarget)) };
   const notices = {
     create: jest.fn<(documents: readonly unknown[]) => Promise<unknown[]>>(
       (documents) =>
@@ -83,18 +90,67 @@ const context = () => {
       (input: unknown) => Promise<void>
     >(() => Promise.resolve()),
   };
+  const sessions = {
+    updateMany: jest.fn<
+      (
+        filter: unknown,
+        update: unknown,
+      ) => {
+        exec: () => Promise<{ modifiedCount: number }>;
+      }
+    >(() => ({
+      exec: jest.fn(() => Promise.resolve({ modifiedCount: 1 })),
+    })),
+  };
   return {
     notices,
     notifications,
+    sessions,
     service: new UserModerationNoticeService(
       notices as never,
       users as never,
       notifications as never,
+      undefined,
+      sessions as never,
     ),
   };
 };
 
 describe('UserModerationNoticeService', () => {
+  it('reconciles restriction session revocation idempotently', async () => {
+    const test = context();
+    await test.service.reconcileSessionRevocation(
+      restrictionEvent(AdminUserRestrictionOperation.APPLY),
+    );
+
+    expect(test.sessions.updateMany).toHaveBeenCalledWith(
+      {
+        userId: targetId,
+        revokedAt: null,
+      },
+      {
+        $set: {
+          revokedAt: new Date('2026-08-20T01:00:00.000Z'),
+          revokeReason: 'account_restricted',
+        },
+      },
+    );
+  });
+
+  it('does not let a stale APPLY event revoke sessions after REMOVE', async () => {
+    const test = context({
+      ...target,
+      version: 2,
+      restriction: null,
+    });
+
+    await test.service.reconcileSessionRevocation(
+      restrictionEvent(AdminUserRestrictionOperation.APPLY),
+    );
+
+    expect(test.sessions.updateMany).not.toHaveBeenCalled();
+  });
+
   it('persists an active public notice without exposing internal moderation data', async () => {
     const test = context();
     await test.service.consumeRestrictionEvent(

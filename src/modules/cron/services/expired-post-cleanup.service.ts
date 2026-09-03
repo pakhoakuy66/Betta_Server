@@ -35,6 +35,15 @@ type StoredRetentionHold = Readonly<{
   retentionHold?: Readonly<{ expiresAt?: Date | null }> | null;
 }>;
 
+export type RequestedPostCleanupResult =
+  | 'COMPLETED'
+  | 'ALREADY_COMPLETED'
+  | 'NOT_REQUIRED'
+  | 'REQUIRES_INTERVENTION'
+  | Readonly<{ status: 'RETRY_LATER'; retryAt: Date }>;
+
+const STALE_DESTRUCTIVE_RESERVATION = 'STALE_DESTRUCTIVE_RESERVATION' as const;
+
 @Injectable()
 export class ExpiredPostCleanupService {
   private readonly logger = new Logger(ExpiredPostCleanupService.name);
@@ -65,6 +74,15 @@ export class ExpiredPostCleanupService {
     let processed = 0;
     let deleted = 0;
     let failed = 0;
+    const reconciled = await this.reconcileStaleDestructiveReservations(
+      new Date(),
+      this.batchSize,
+    );
+    if (reconciled > 0) {
+      this.logger.error(
+        `Post cleanup moved stale destructive reservations to manual review. count=${reconciled}`,
+      );
+    }
 
     for (let index = 0; index < this.batchSize; index += 1) {
       const post = await this.claimNextExpiredPost();
@@ -93,7 +111,142 @@ export class ExpiredPostCleanupService {
     return { processed, deleted, failed };
   }
 
-  private async claimNextExpiredPost(): Promise<ExpiredPostCleanupTarget | null> {
+  async cleanupRequestedPost(
+    postPublicId: string,
+  ): Promise<RequestedPostCleanupResult> {
+    const now = new Date();
+    if (
+      (await this.reconcileStaleDestructiveReservations(
+        now,
+        1,
+        postPublicId,
+      )) === 1
+    ) {
+      return 'REQUIRES_INTERVENTION';
+    }
+
+    const post = await this.claimNextExpiredPost(postPublicId);
+    if (!post) {
+      const current = await this.postModel
+        .findOne({ publicId: postPublicId })
+        .select(
+          'moderationState cleanupStatus cleanupLockedUntil ' +
+            '+cleanupDestructiveStartedAt evidenceHoldUntil',
+        )
+        .lean<{
+          moderationState?: PostModerationState;
+          cleanupStatus?: PostCleanupStatus;
+          cleanupLockedUntil?: Date | null;
+          cleanupDestructiveStartedAt?: Date | null;
+          evidenceHoldUntil?: Date | null;
+        } | null>()
+        .exec();
+      if (!current) return 'ALREADY_COMPLETED';
+      if (current.moderationState !== PostModerationState.TERMINAL_DELETED) {
+        return 'NOT_REQUIRED';
+      }
+      return current.cleanupStatus === PostCleanupStatus.MANUAL_REVIEW
+        ? 'REQUIRES_INTERVENTION'
+        : this.retryLater(current, now);
+    }
+
+    try {
+      if (!(await this.isEvidenceReleased(post))) {
+        return this.loadRetryLater(postPublicId);
+      }
+      return (await this.cleanupOnePost(post))
+        ? 'COMPLETED'
+        : this.loadRetryLater(postPublicId);
+    } catch (error: unknown) {
+      const state = await this.markCleanupFailed(post, error);
+      if (state === PostCleanupStatus.MANUAL_REVIEW) {
+        return 'REQUIRES_INTERVENTION';
+      }
+      const retryable = new Error('Post cleanup tạm thời thất bại') as Error & {
+        code: string;
+      };
+      retryable.code = 'POST_CLEANUP_FAILED';
+      throw retryable;
+    }
+  }
+
+  private async reconcileStaleDestructiveReservations(
+    now: Date,
+    limit: number,
+    publicId?: string,
+  ): Promise<number> {
+    const filter = {
+      ...(publicId ? { publicId } : {}),
+      cleanupStatus: PostCleanupStatus.PROCESSING,
+      cleanupDestructiveStartedAt: { $type: 'date' as const },
+      $or: [
+        { cleanupLockedUntil: { $lte: now } },
+        { cleanupLockedUntil: null },
+        { cleanupLockedUntil: { $exists: false } },
+      ],
+    };
+    const candidates = await this.postModel
+      .find(filter)
+      .sort({ cleanupLockedUntil: 1, _id: 1 })
+      .limit(limit)
+      .select('_id')
+      .lean<readonly Readonly<{ _id: Types.ObjectId }>[]>()
+      .exec();
+    if (candidates.length === 0) return 0;
+    const result = await this.postModel.updateMany(
+      {
+        ...filter,
+        _id: { $in: candidates.map(({ _id }) => _id) },
+      },
+      {
+        $set: {
+          cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
+          cleanupLockedUntil: null,
+          cleanupLockToken: null,
+          cleanupLastError: STALE_DESTRUCTIVE_RESERVATION,
+        },
+      },
+    );
+    return result.modifiedCount;
+  }
+
+  private async loadRetryLater(
+    postPublicId: string,
+  ): Promise<Readonly<{ status: 'RETRY_LATER'; retryAt: Date }>> {
+    const current = await this.postModel
+      .findOne({ publicId: postPublicId })
+      .select('cleanupLockedUntil evidenceHoldUntil')
+      .lean<{
+        cleanupLockedUntil?: Date | null;
+        evidenceHoldUntil?: Date | null;
+      } | null>()
+      .exec();
+    return this.retryLater(current ?? {}, new Date());
+  }
+
+  private retryLater(
+    current: Readonly<{
+      cleanupLockedUntil?: Date | null;
+      evidenceHoldUntil?: Date | null;
+    }>,
+    now: Date,
+  ): Readonly<{ status: 'RETRY_LATER'; retryAt: Date }> {
+    const retryAt = [current.cleanupLockedUntil, current.evidenceHoldUntil]
+      .filter(
+        (value): value is Date =>
+          value instanceof Date && value.getTime() > now.getTime(),
+      )
+      .reduce(
+        (latest, value) =>
+          value.getTime() > latest.getTime() ? value : latest,
+        new Date(now.getTime() + 1_000),
+      );
+    return Object.freeze({ status: 'RETRY_LATER', retryAt });
+  }
+
+  private async claimNextExpiredPost(
+    publicId?: string,
+  ): Promise<ExpiredPostCleanupTarget | null> {
     const now = new Date();
     const lockUntil = new Date(now.getTime() + this.lockMs);
     const lockToken = randomUUID();
@@ -102,6 +255,14 @@ export class ExpiredPostCleanupService {
       .findOneAndUpdate(
         {
           $and: [
+            ...(publicId
+              ? [
+                  {
+                    publicId,
+                    moderationState: PostModerationState.TERMINAL_DELETED,
+                  },
+                ]
+              : []),
             {
               $or: [
                 { cleanupDestructiveStartedAt: null },
@@ -385,7 +546,7 @@ export class ExpiredPostCleanupService {
   private async markCleanupFailed(
     post: ExpiredPostCleanupTarget,
     error: unknown,
-  ): Promise<void> {
+  ): Promise<PostCleanupStatus> {
     const message = error instanceof Error ? error.message : String(error);
 
     this.logger.error(
@@ -411,9 +572,11 @@ export class ExpiredPostCleanupService {
         },
       )
       .exec();
-    if (manualReview.modifiedCount === 1) return;
+    if (manualReview.modifiedCount === 1) {
+      return PostCleanupStatus.MANUAL_REVIEW;
+    }
 
-    await this.postModel
+    const failed = await this.postModel
       .updateOne(
         {
           _id: post._id,
@@ -434,5 +597,8 @@ export class ExpiredPostCleanupService {
         },
       )
       .exec();
+    return failed.modifiedCount === 1
+      ? PostCleanupStatus.FAILED
+      : PostCleanupStatus.MANUAL_REVIEW;
   }
 }

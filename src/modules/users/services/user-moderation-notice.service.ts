@@ -3,11 +3,22 @@ import { InjectModel } from '@nestjs/mongoose';
 import { type Model, Types } from 'mongoose';
 import type { ClaimedOutboxEvent } from '../../../common/outbox/outbox.interface';
 import { NotificationsService } from '../../notifications/services/notifications.service';
+import {
+  AuthSession,
+  SessionRevokeReason,
+} from '../../auth/schemas/auth-session.schema';
 import { Post, PostModerationState } from '../../posts/schemas/post.schema';
 import { isValidPostPublicId } from '../../posts/utils/generate-post-public-id';
-import { AdminUserDeletionOperation } from '../../admin/constants/admin-user-deletion.constants';
-import { AdminUserRestrictionOperation } from '../../admin/constants/admin-user-restriction.constants';
 import {
+  ADMIN_USER_DELETION_EVENT_TYPE,
+  AdminUserDeletionOperation,
+} from '../../admin/constants/admin-user-deletion.constants';
+import {
+  ADMIN_USER_RESTRICTION_EVENT_TYPE,
+  AdminUserRestrictionOperation,
+} from '../../admin/constants/admin-user-restriction.constants';
+import {
+  UserDeletionOrigin,
   UserRestrictionType,
   USER_RESTRICTION_PUBLIC_REASON_PATTERN,
   USER_RESTRICTION_SUPPORT_REFERENCE_PATTERN,
@@ -46,6 +57,12 @@ type UserTarget = Readonly<{
   publicId: string;
   isDeleted: boolean;
   status: string;
+  version: number;
+  deletionOrigin?: UserDeletionOrigin | null;
+  restriction?: Readonly<{
+    type: UserRestrictionType;
+    effectiveAt: Date;
+  }> | null;
 }>;
 type PostTarget = Readonly<{
   _id: Types.ObjectId;
@@ -64,7 +81,76 @@ export class UserModerationNoticeService {
     @Optional()
     @InjectModel(Post.name)
     private readonly posts?: Model<Post>,
+    @Optional()
+    @InjectModel(AuthSession.name)
+    private readonly sessions?: Model<AuthSession>,
   ) {}
+
+  async reconcileSessionRevocation(event: ClaimedOutboxEvent): Promise<void> {
+    const payload = this.payload(event);
+    const restrictionApply =
+      event.eventType === ADMIN_USER_RESTRICTION_EVENT_TYPE &&
+      payload.operation === AdminUserRestrictionOperation.APPLY;
+    const deletionApply =
+      event.eventType === ADMIN_USER_DELETION_EVENT_TYPE &&
+      payload.operation === AdminUserDeletionOperation.DELETE;
+    if (!restrictionApply && !deletionApply) return;
+    if (!this.sessions) throw this.invalidEvent();
+
+    const afterVersion = payload.afterVersion;
+    if (
+      !Number.isSafeInteger(afterVersion) ||
+      Number(afterVersion) < 1 ||
+      !(event.occurredAt instanceof Date) ||
+      Number.isNaN(event.occurredAt.getTime())
+    ) {
+      throw this.invalidEvent();
+    }
+
+    const target = await this.loadTarget(event);
+    if (target.version > Number(afterVersion)) return;
+    if (target.version !== Number(afterVersion)) throw this.invalidEvent();
+
+    if (restrictionApply) {
+      const restriction = this.record(payload.restriction);
+      const restrictionType = payload.restrictionType;
+      if (
+        (restrictionType !== UserRestrictionType.TEMPORARY_SUSPENSION &&
+          restrictionType !== UserRestrictionType.INDEFINITE_BAN) ||
+        target.isDeleted ||
+        target.restriction?.type !== restrictionType ||
+        target.restriction.effectiveAt.getTime() !==
+          this.date(restriction.effectiveAt).getTime()
+      ) {
+        throw this.invalidEvent();
+      }
+    }
+
+    if (
+      deletionApply &&
+      (!target.isDeleted ||
+        target.deletionOrigin !== UserDeletionOrigin.ADMIN_MODERATION)
+    ) {
+      throw this.invalidEvent();
+    }
+
+    await this.sessions
+      .updateMany(
+        {
+          userId: target._id,
+          revokedAt: null,
+        },
+        {
+          $set: {
+            revokedAt: event.occurredAt,
+            revokeReason: restrictionApply
+              ? SessionRevokeReason.ACCOUNT_RESTRICTED
+              : SessionRevokeReason.ACCOUNT_DELETED,
+          },
+        },
+      )
+      .exec();
+  }
 
   async consumePostEvent(event: ClaimedOutboxEvent): Promise<void> {
     if (!this.posts) throw this.invalidEvent();
@@ -268,7 +354,9 @@ export class UserModerationNoticeService {
     }
     const target = await this.users
       .findOne({ publicId: event.aggregatePublicId })
-      .select('_id publicId isDeleted status')
+      .select(
+        '_id publicId isDeleted status +version +deletionOrigin +restriction',
+      )
       .lean<UserTarget | null>()
       .exec();
     if (!target) {
@@ -414,13 +502,15 @@ export class UserModerationNoticeService {
     return date;
   }
 
-  private invalidEvent(): Error & { code: string } {
+  private invalidEvent(): Error & { code: string; retryable: false } {
     const error = new Error(
       'Moderation outbox payload không hợp lệ',
     ) as Error & {
       code: string;
+      retryable: false;
     };
     error.code = 'INVALID_MODERATION_EVENT';
+    error.retryable = false;
     return error;
   }
 }

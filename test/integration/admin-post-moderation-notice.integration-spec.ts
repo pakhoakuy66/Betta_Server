@@ -20,6 +20,7 @@ import { OutboxProcessorService } from '../../src/common/outbox/outbox-processor
 import { OutboxService } from '../../src/common/outbox/outbox.service';
 import { ADMIN_POST_MODERATION_EVENT_TYPE } from '../../src/modules/admin/constants/admin-post-moderation.constants';
 import { ExpiredPostCleanupService } from '../../src/modules/cron/services/expired-post-cleanup.service';
+import { PostModerationCleanupHandler } from '../../src/modules/cron/services/post-moderation-cleanup.handler';
 import {
   Notification,
   NotificationSchema,
@@ -28,6 +29,7 @@ import {
 import { NotificationsService } from '../../src/modules/notifications/services/notifications.service';
 import {
   Post,
+  PostCleanupStatus,
   PostModerationState,
   PostSchema,
 } from '../../src/modules/posts/schemas/post.schema';
@@ -121,16 +123,17 @@ describe('Admin Post moderation notice MongoDB integration', () => {
       notificationService,
       posts,
     );
+    cleanup = new ExpiredPostCleanupService(posts, users, {
+      deleteImages,
+    } as unknown as UploadsService);
     const registry = new OutboxHandlerRegistry();
     new PostModerationChangedHandler(registry, noticeService).onModuleInit();
+    new PostModerationCleanupHandler(registry, cleanup).onModuleInit();
     processor = new OutboxProcessorService(
       outbox,
       registry,
       new ConfigService(),
     );
-    cleanup = new ExpiredPostCleanupService(posts, users, {
-      deleteImages,
-    } as unknown as UploadsService);
   });
 
   beforeEach(async () => {
@@ -248,5 +251,170 @@ describe('Admin Post moderation notice MongoDB integration', () => {
       failed: 0,
     });
     await expect(posts.exists({ _id: post._id })).resolves.toBeNull();
+  });
+
+  it('dead-letters stale destructive reservation without repeating Cloudinary cleanup', async () => {
+    const user = await users.create({
+      publicId: generateUserPublicId(),
+      username: 'post_crash_' + randomUUID().slice(0, 8),
+      fullname: 'Post Crash User',
+      phone: '08' + String(Date.now()).slice(-8),
+      email: randomUUID() + '@user.test',
+      status: 'active',
+      isDeleted: false,
+      restriction: null,
+      postsCount: 1,
+    });
+    const post = await posts.create({
+      publicId: generatePostPublicId(),
+      authorId: user._id,
+      content: 'terminal Post with stale destructive reservation',
+      images: [
+        {
+          url: 'https://res.cloudinary.com/betta/image/upload/v1/post.webp',
+          publicId: 'post-stale-destructive-media',
+        },
+      ],
+      expireAt: new Date(Date.now() - 60_000),
+      moderationState: PostModerationState.TERMINAL_DELETED,
+      moderationVersion: 1,
+      moderationNoticeVersion: 1,
+      isDeletedByAdmin: true,
+      cleanupStatus: PostCleanupStatus.PROCESSING,
+      cleanupLockedUntil: new Date(Date.now() + 5 * 60 * 1_000),
+      cleanupLockToken: 'crashed-worker-token',
+      cleanupDestructiveStartedAt: new Date(),
+      cleanupAttempts: 1,
+    });
+    const session = await connection.startSession();
+    let eventPublicId = '';
+    try {
+      await session.withTransaction(async () => {
+        eventPublicId = await outbox.enqueue({
+          eventType: ADMIN_POST_MODERATION_EVENT_TYPE,
+          dedupeKey: 'post-moderation:' + post.publicId + ':1',
+          aggregateType: 'post',
+          aggregatePublicId: post.publicId,
+          payload: {
+            schemaVersion: 1,
+            postPublicId: post.publicId,
+            state: PostModerationState.TERMINAL_DELETED,
+            publicReasonCode: 'severe_policy_violation',
+            publicMessage: 'Nội dung đã bị gỡ theo chính sách cộng đồng',
+            moderationVersion: 1,
+            cleanupRequested: true,
+          },
+          mongoSession: session,
+        });
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    await processor.drain(1);
+
+    await expect(
+      events.findOne({ publicId: eventPublicId }).lean().exec(),
+    ).resolves.toMatchObject({
+      status: OutboxStatus.PENDING,
+      attempt: 0,
+      lastErrorCode: 'POST_CLEANUP_IN_PROGRESS',
+      completedHandlerIds: ['moderation.post.notice.v1'],
+    });
+    expect(deleteImages).not.toHaveBeenCalled();
+
+    await Promise.all([
+      posts.collection.updateOne(
+        { _id: post._id },
+        { $set: { cleanupLockedUntil: new Date(0) } },
+      ),
+      events.collection.updateOne(
+        { publicId: eventPublicId },
+        { $set: { availableAt: new Date(0) } },
+      ),
+    ]);
+    await processor.drain(1);
+
+    const [storedPost, storedEvent] = await Promise.all([
+      posts
+        .findById(post._id)
+        .select('+cleanupDestructiveStartedAt +cleanupLockToken')
+        .lean()
+        .exec(),
+      events.findOne({ publicId: eventPublicId }).lean().exec(),
+    ]);
+    expect(storedPost).toMatchObject({
+      cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
+      cleanupLockedUntil: null,
+      cleanupLockToken: null,
+      cleanupLastError: 'STALE_DESTRUCTIVE_RESERVATION',
+    });
+    expect(storedPost?.cleanupDestructiveStartedAt).toBeInstanceOf(Date);
+    expect(storedEvent).toMatchObject({
+      status: OutboxStatus.DEAD_LETTER,
+      attempt: 1,
+      lastErrorCode: 'POST_CLEANUP_MANUAL_REVIEW',
+      completedHandlerIds: ['moderation.post.notice.v1'],
+    });
+    expect(JSON.stringify(storedEvent)).not.toMatch(
+      /Cloudinary|stack|crashed-worker-token/iu,
+    );
+    expect(deleteImages).not.toHaveBeenCalled();
+    await expect(posts.exists({ _id: post._id })).resolves.not.toBeNull();
+  });
+
+  it('reconciles a stale destructive reservation for an ordinary expired Post', async () => {
+    const user = await users.create({
+      publicId: generateUserPublicId(),
+      username: 'expired_crash_' + randomUUID().slice(0, 8),
+      fullname: 'Expired Crash User',
+      phone: '07' + String(Date.now()).slice(-8),
+      email: randomUUID() + '@user.test',
+      status: 'active',
+      isDeleted: false,
+      restriction: null,
+      postsCount: 1,
+    });
+    const post = await posts.create({
+      publicId: generatePostPublicId(),
+      authorId: user._id,
+      content: 'ordinary expired Post with stale destructive reservation',
+      images: [
+        {
+          url: 'https://res.cloudinary.com/betta/image/upload/v1/expired.webp',
+          publicId: 'expired-post-stale-destructive-media',
+        },
+      ],
+      expireAt: new Date(Date.now() - 60_000),
+      moderationState: PostModerationState.ACTIVE,
+      moderationVersion: 0,
+      moderationNoticeVersion: 0,
+      cleanupStatus: PostCleanupStatus.PROCESSING,
+      cleanupLockedUntil: new Date(0),
+      cleanupLockToken: 'expired-crashed-worker-token',
+      cleanupDestructiveStartedAt: new Date(Date.now() - 120_000),
+      cleanupAttempts: 1,
+    });
+
+    await expect(cleanup.cleanupExpiredPosts()).resolves.toEqual({
+      processed: 0,
+      deleted: 0,
+      failed: 0,
+    });
+
+    const storedPost = await posts
+      .findById(post._id)
+      .select('+cleanupDestructiveStartedAt +cleanupLockToken')
+      .lean()
+      .exec();
+    expect(storedPost).toMatchObject({
+      cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
+      cleanupLockedUntil: null,
+      cleanupLockToken: null,
+      cleanupLastError: 'STALE_DESTRUCTIVE_RESERVATION',
+    });
+    expect(storedPost?.cleanupDestructiveStartedAt).toBeInstanceOf(Date);
+    expect(deleteImages).not.toHaveBeenCalled();
+    await expect(posts.exists({ _id: post._id })).resolves.not.toBeNull();
   });
 });

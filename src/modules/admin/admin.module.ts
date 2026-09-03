@@ -133,6 +133,7 @@ import {
 import { AdminReportAccessLogger } from './services/admin-report-access-logger.service';
 import { AdminReportAssignmentService } from './services/admin-report-assignment.service';
 import { AdminReportDecisionService } from './services/admin-report-decision.service';
+import { AdminReportDecisionOutboxHandler } from './services/admin-report-decision-outbox.handler';
 import { AdminReportTargetMutationService } from './services/admin-report-target-mutation.service';
 import { AdminReportQueueService } from './services/admin-report-queue.service';
 import { AdminAccessSupportContactService } from './services/admin-access-support-contact.service';
@@ -242,6 +243,7 @@ import {
     AdminPostModerationService,
     AdminReportAssignmentService,
     AdminReportDecisionService,
+    AdminReportDecisionOutboxHandler,
     AdminReportTargetMutationService,
     AdminReportQueueService,
     AdminAccessSupportContactService,

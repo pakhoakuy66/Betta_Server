@@ -11,6 +11,7 @@ import {
   OUTBOX_DEDUPE_INDEX,
   OUTBOX_DEDUPE_KEY_PATTERN,
   OUTBOX_EVENT_TYPE_PATTERN,
+  OUTBOX_HANDLER_ID_PATTERN,
   OUTBOX_PUBLIC_ID_PATTERN,
   OUTBOX_RETENTION_INDEX,
   OUTBOX_SCHEMA_VERSION,
@@ -115,6 +116,21 @@ export class OutboxEvent {
 
   @Prop({ type: Date, default: null })
   publishedAt!: Date | null;
+
+  @Prop({
+    type: [String],
+    default: [],
+    validate: {
+      validator: (values: unknown): boolean =>
+        Array.isArray(values) &&
+        values.length <= 32 &&
+        values.every(
+          (value) =>
+            typeof value === 'string' && OUTBOX_HANDLER_ID_PATTERN.test(value),
+        ),
+    },
+  })
+  completedHandlerIds!: string[];
 
   @Prop({ type: String, default: null, maxlength: 64 })
   lastErrorCode!: string | null;

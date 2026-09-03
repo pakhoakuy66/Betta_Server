@@ -5,7 +5,10 @@ describe('OutboxProcessorService scheduling gate', () => {
   it.each([undefined, 'false', 'TRUE', '1'])(
     'does not drain unless explicitly enabled (value=%s)',
     async (value) => {
-      const outbox = { claim: jest.fn() };
+      const outbox = {
+        claim: jest.fn(),
+        reconcileExpiredLeases: jest.fn(),
+      };
       const service = new OutboxProcessorService(
         outbox as never,
         {} as never,
@@ -19,7 +22,10 @@ describe('OutboxProcessorService scheduling gate', () => {
   );
 
   it('drains when explicitly enabled', async () => {
-    const outbox = { claim: jest.fn(() => Promise.resolve(null)) };
+    const outbox = {
+      claim: jest.fn(() => Promise.resolve(null)),
+      reconcileExpiredLeases: jest.fn(() => Promise.resolve(0)),
+    };
     const service = new OutboxProcessorService(
       outbox as never,
       {} as never,

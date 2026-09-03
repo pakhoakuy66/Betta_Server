@@ -10,6 +10,7 @@ import { TasksService } from './services/tasks.service';
 import { ExpiredPostCleanupService } from './services/expired-post-cleanup.service';
 import { AdminModule } from '../admin/admin.module';
 import { Report, ReportSchema } from '../reports/schemas/report.schema';
+import { PostModerationCleanupHandler } from './services/post-moderation-cleanup.handler';
 
 @Module({
   imports: [
@@ -24,6 +25,10 @@ import { Report, ReportSchema } from '../reports/schemas/report.schema';
     ]),
     UploadsModule,
   ],
-  providers: [TasksService, ExpiredPostCleanupService],
+  providers: [
+    TasksService,
+    ExpiredPostCleanupService,
+    PostModerationCleanupHandler,
+  ],
 })
 export class CronModule {}

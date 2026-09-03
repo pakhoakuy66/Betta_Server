@@ -585,7 +585,7 @@ describe('ADM-MOD-08 report evidence retention MongoDB integration', () => {
     expect(deleteImages).not.toHaveBeenCalled();
   });
 
-  it('prevents a stale Post worker from repeating physical deletion after reservation', async () => {
+  it('fences an expired in-flight Post reservation without repeating physical deletion', async () => {
     const post = await posts.create({
       publicId: generatePostPublicId(),
       authorId: new Types.ObjectId(),
@@ -634,14 +634,28 @@ describe('ADM-MOD-08 report evidence retention MongoDB integration', () => {
       deleted: 0,
       failed: 0,
     });
+    const fencedPost = await posts
+      .findById(post._id)
+      .select('+cleanupDestructiveStartedAt +cleanupLockToken')
+      .lean()
+      .exec();
+    expect(fencedPost).toMatchObject({
+      cleanupStatus: PostCleanupStatus.MANUAL_REVIEW,
+      cleanupLockedUntil: null,
+      cleanupLockToken: null,
+      cleanupLastError: 'STALE_DESTRUCTIVE_RESERVATION',
+    });
+    expect(fencedPost?.cleanupDestructiveStartedAt).toBeInstanceOf(Date);
     expect(deleteImages).toHaveBeenCalledTimes(1);
 
     releaseDeletion();
     await expect(firstRun).resolves.toEqual({
       processed: 1,
-      deleted: 1,
-      failed: 0,
+      deleted: 0,
+      failed: 1,
     });
+    expect(deleteImages).toHaveBeenCalledTimes(1);
+    await expect(posts.exists({ _id: post._id })).resolves.not.toBeNull();
   });
 
   it('moves an ambiguous Post media deletion failure to manual review', async () => {

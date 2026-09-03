@@ -25,10 +25,13 @@ export type ClaimedOutboxEvent = Readonly<{
   correlationId?: string;
   attempt: number;
   occurredAt: Date;
+  completedHandlerIds?: readonly string[];
 }>;
 
 export interface OutboxEventHandler {
   readonly eventType: string;
+  readonly handlerId: string;
+  readonly order?: number;
   handle(event: ClaimedOutboxEvent): Promise<void>;
 }
 
@@ -42,4 +45,10 @@ export type OutboxBacklogMetrics = Readonly<{
 export type StoredOutboxState = Readonly<{
   status: OutboxStatus;
   attempt: number;
+}>;
+
+export type OutboxFailure = Readonly<{
+  code: string;
+  retryable: boolean;
+  retryAt?: Date;
 }>;

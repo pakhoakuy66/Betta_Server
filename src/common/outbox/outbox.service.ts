@@ -10,6 +10,7 @@ import {
   OUTBOX_DEAD_LETTER_RETENTION_DAYS,
   OUTBOX_DEDUPE_KEY_PATTERN,
   OUTBOX_EVENT_TYPE_PATTERN,
+  OUTBOX_HANDLER_ID_PATTERN,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_MAX_PAYLOAD_BYTES,
   OUTBOX_MAX_PAYLOAD_DEPTH,
@@ -79,6 +80,7 @@ export class OutboxService {
         .findOneAndUpdate(
           {
             availableAt: { $lte: now },
+            attempt: { $lt: OUTBOX_MAX_ATTEMPTS },
             $or: [
               { status: OutboxStatus.PENDING },
               {
@@ -135,16 +137,138 @@ export class OutboxService {
     }
   }
 
+  async extendLease(
+    publicId: string,
+    leaseId: string,
+    now: Date,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const result = await this.events.updateOne(
+      {
+        publicId,
+        status: OutboxStatus.PROCESSING,
+        leaseId,
+        leaseExpiresAt: { $gt: now },
+      },
+      {
+        $set: {
+          leaseExpiresAt: new Date(now.getTime() + leaseMs),
+        },
+      },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async completeHandler(
+    publicId: string,
+    leaseId: string,
+    handlerId: string,
+  ): Promise<boolean> {
+    if (!OUTBOX_HANDLER_ID_PATTERN.test(handlerId)) {
+      throw new TypeError('Outbox handler ID không hợp lệ');
+    }
+    const result = await this.events.updateOne(
+      { publicId, status: OutboxStatus.PROCESSING, leaseId },
+      { $addToSet: { completedHandlerIds: handlerId } },
+    );
+    return result.modifiedCount === 1 || result.matchedCount === 1;
+  }
+
+  async reconcileExpiredLeases(now: Date, limit: number): Promise<number> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new TypeError('Outbox reconciliation limit không hợp lệ');
+    }
+    const exhausted = await this.events
+      .find({
+        attempt: { $gte: OUTBOX_MAX_ATTEMPTS },
+        $or: [
+          { status: OutboxStatus.PENDING },
+          {
+            status: OutboxStatus.PROCESSING,
+            leaseExpiresAt: { $lte: now },
+          },
+        ],
+      })
+      .sort({ availableAt: 1, _id: 1 })
+      .limit(limit)
+      .select('_id')
+      .lean<readonly Readonly<{ _id: unknown }>[]>()
+      .exec();
+    let reconciled = 0;
+    if (exhausted.length > 0) {
+      const dead = await this.events.updateMany(
+        {
+          _id: { $in: exhausted.map((record) => record._id) },
+          attempt: { $gte: OUTBOX_MAX_ATTEMPTS },
+          $or: [
+            { status: OutboxStatus.PENDING },
+            {
+              status: OutboxStatus.PROCESSING,
+              leaseExpiresAt: { $lte: now },
+            },
+          ],
+        },
+        {
+          $set: {
+            status: OutboxStatus.DEAD_LETTER,
+            leaseId: null,
+            leaseExpiresAt: null,
+            lastErrorCode: 'MAX_ATTEMPTS_EXHAUSTED',
+            availableAt: now,
+            retentionExpiresAt: new Date(
+              now.getTime() + OUTBOX_DEAD_LETTER_RETENTION_DAYS * DAY_MS,
+            ),
+          },
+        },
+      );
+      reconciled += dead.modifiedCount;
+    }
+
+    const remaining = limit - reconciled;
+    if (remaining <= 0) return reconciled;
+    const stale = await this.events
+      .find({
+        status: OutboxStatus.PROCESSING,
+        leaseExpiresAt: { $lte: now },
+        attempt: { $lt: OUTBOX_MAX_ATTEMPTS },
+      })
+      .sort({ leaseExpiresAt: 1, _id: 1 })
+      .limit(remaining)
+      .select('_id')
+      .lean<readonly Readonly<{ _id: unknown }>[]>()
+      .exec();
+    if (stale.length === 0) return reconciled;
+    const retryable = await this.events.updateMany(
+      {
+        _id: { $in: stale.map((record) => record._id) },
+        status: OutboxStatus.PROCESSING,
+        leaseExpiresAt: { $lte: now },
+        attempt: { $lt: OUTBOX_MAX_ATTEMPTS },
+      },
+      {
+        $set: {
+          status: OutboxStatus.PENDING,
+          leaseId: null,
+          leaseExpiresAt: null,
+          lastErrorCode: 'LEASE_EXPIRED',
+          availableAt: now,
+        },
+      },
+    );
+    return reconciled + retryable.modifiedCount;
+  }
+
   async markFailed(
     event: ClaimedOutboxEvent,
     leaseId: string,
     errorCode: string,
     now: Date,
+    retryable = true,
   ): Promise<void> {
     const safeCode = ERROR_CODE_PATTERN.test(errorCode)
       ? errorCode
       : 'HANDLER_FAILED';
-    const dead = event.attempt >= OUTBOX_MAX_ATTEMPTS;
+    const dead = !retryable || event.attempt >= OUTBOX_MAX_ATTEMPTS;
     const retryDelayMs = Math.min(3_600_000, 1_000 * 2 ** (event.attempt - 1));
     const set: Record<string, unknown> = {
       status: dead ? OutboxStatus.DEAD_LETTER : OutboxStatus.PENDING,
@@ -161,6 +285,43 @@ export class OutboxService {
     const result = await this.events.updateOne(
       { publicId: event.publicId, status: OutboxStatus.PROCESSING, leaseId },
       { $set: { ...set, leaseId: null, leaseExpiresAt: null } },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new Error('Outbox lease không còn thuộc worker hiện tại');
+    }
+  }
+
+  async reschedule(
+    event: ClaimedOutboxEvent,
+    leaseId: string,
+    errorCode: string,
+    now: Date,
+    retryAt: Date,
+  ): Promise<void> {
+    const safeCode = ERROR_CODE_PATTERN.test(errorCode)
+      ? errorCode
+      : 'HANDLER_DEFERRED';
+    const availableAt =
+      retryAt.getTime() > now.getTime()
+        ? retryAt
+        : new Date(now.getTime() + 1_000);
+    const result = await this.events.updateOne(
+      {
+        publicId: event.publicId,
+        status: OutboxStatus.PROCESSING,
+        leaseId,
+        attempt: event.attempt,
+      },
+      {
+        $set: {
+          status: OutboxStatus.PENDING,
+          availableAt,
+          leaseId: null,
+          leaseExpiresAt: null,
+          lastErrorCode: safeCode,
+        },
+        $inc: { attempt: -1 },
+      },
     );
     if (result.modifiedCount !== 1) {
       throw new Error('Outbox lease không còn thuộc worker hiện tại');
@@ -262,6 +423,9 @@ export class OutboxService {
       ...(record.correlationId ? { correlationId: record.correlationId } : {}),
       attempt: record.attempt,
       occurredAt: record.occurredAt,
+      completedHandlerIds: Object.freeze([
+        ...(record.completedHandlerIds ?? []),
+      ]),
     });
   }
 

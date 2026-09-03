@@ -14,6 +14,8 @@ export class UserRestrictionChangedHandler
   implements OutboxEventHandler, OnModuleInit
 {
   readonly eventType = ADMIN_USER_RESTRICTION_EVENT_TYPE;
+  readonly handlerId = 'moderation.user-restriction.notice.v1';
+  readonly order = 100;
 
   constructor(
     private readonly registry: OutboxHandlerRegistry,
@@ -34,6 +36,8 @@ export class UserDeletionChangedHandler
   implements OutboxEventHandler, OnModuleInit
 {
   readonly eventType = ADMIN_USER_DELETION_EVENT_TYPE;
+  readonly handlerId = 'moderation.user-deletion.notice.v1';
+  readonly order = 100;
 
   constructor(
     private readonly registry: OutboxHandlerRegistry,
@@ -54,6 +58,8 @@ export class PostModerationChangedHandler
   implements OutboxEventHandler, OnModuleInit
 {
   readonly eventType = ADMIN_POST_MODERATION_EVENT_TYPE;
+  readonly handlerId = 'moderation.post.notice.v1';
+  readonly order = 100;
 
   constructor(
     private readonly registry: OutboxHandlerRegistry,
@@ -66,5 +72,49 @@ export class PostModerationChangedHandler
 
   handle(event: ClaimedOutboxEvent): Promise<void> {
     return this.notices.consumePostEvent(event);
+  }
+}
+
+@Injectable()
+export class UserRestrictionSessionRevocationHandler
+  implements OutboxEventHandler, OnModuleInit
+{
+  readonly eventType = ADMIN_USER_RESTRICTION_EVENT_TYPE;
+  readonly handlerId = 'moderation.user-restriction.session-revoke.v1';
+  readonly order = 50;
+
+  constructor(
+    private readonly registry: OutboxHandlerRegistry,
+    private readonly notices: UserModerationNoticeService,
+  ) {}
+
+  onModuleInit(): void {
+    this.registry.register(this);
+  }
+
+  handle(event: ClaimedOutboxEvent): Promise<void> {
+    return this.notices.reconcileSessionRevocation(event);
+  }
+}
+
+@Injectable()
+export class UserDeletionSessionRevocationHandler
+  implements OutboxEventHandler, OnModuleInit
+{
+  readonly eventType = ADMIN_USER_DELETION_EVENT_TYPE;
+  readonly handlerId = 'moderation.user-deletion.session-revoke.v1';
+  readonly order = 50;
+
+  constructor(
+    private readonly registry: OutboxHandlerRegistry,
+    private readonly notices: UserModerationNoticeService,
+  ) {}
+
+  onModuleInit(): void {
+    this.registry.register(this);
+  }
+
+  handle(event: ClaimedOutboxEvent): Promise<void> {
+    return this.notices.reconcileSessionRevocation(event);
   }
 }
