@@ -82,6 +82,7 @@ export enum AdminAuditAction {
   REPORT_REJECTED = 'moderation.report.rejected',
   SYSTEM_REPORT_TRANSITIONED = 'moderation.system_report.transitioned',
   SPONSORED_CREATED = 'sponsored.created',
+  SPONSORED_SCHEDULED = 'sponsored.scheduled',
   SPONSORED_UPDATED = 'sponsored.updated',
   SPONSORED_DELETED = 'sponsored.deleted',
   SPONSORED_RESTORED = 'sponsored.restored',

@@ -92,6 +92,7 @@ const ACTION_TARGET_TYPE: Readonly<
   [AdminAuditAction.SYSTEM_REPORT_TRANSITIONED]:
     AdminAuditTargetType.SYSTEM_REPORT,
   [AdminAuditAction.SPONSORED_CREATED]: AdminAuditTargetType.SPONSORED_POST,
+  [AdminAuditAction.SPONSORED_SCHEDULED]: AdminAuditTargetType.SPONSORED_POST,
   [AdminAuditAction.SPONSORED_UPDATED]: AdminAuditTargetType.SPONSORED_POST,
   [AdminAuditAction.SPONSORED_DELETED]: AdminAuditTargetType.SPONSORED_POST,
   [AdminAuditAction.SPONSORED_RESTORED]: AdminAuditTargetType.SPONSORED_POST,

@@ -22,6 +22,7 @@ import { ReactionModule } from './modules/reactions/reaction.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { OutboxModule } from './common/outbox/outbox.module';
 import { UserModerationNoticeModule } from './modules/users/user-moderation-notice.module';
+import { SponsoredPostsModule } from './modules/sponsored-posts/sponsored-posts.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { UserModerationNoticeModule } from './modules/users/user-moderation-noti
     CronModule,
     ReactionModule,
     AdminModule,
+    SponsoredPostsModule,
   ],
   controllers: [AppController],
   providers: [
