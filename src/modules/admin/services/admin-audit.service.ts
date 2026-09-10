@@ -274,7 +274,7 @@ export class AdminAuditService {
       'reasonNote',
       true,
     );
-    const metadata = this.normalizeMetadata(input.metadata);
+    const metadata = this.normalizeMetadata(input.metadata, input.action);
     this.validateLifecycleContract(input.action, target.type, metadata);
 
     if (
@@ -379,12 +379,18 @@ export class AdminAuditService {
 
   private normalizeMetadata(
     metadata?: AdminAuditMetadataInput,
+    action?: AdminAuditAction,
   ): Record<string, unknown> | undefined {
     if (metadata === undefined) return undefined;
     if (!this.isPlainObject(metadata)) {
       throw new TypeError('Admin audit metadata phải là plain object');
     }
     const allowed = new Set([
+      'sponsoredChangedFields',
+      'sponsoredBeforeStartAt',
+      'sponsoredAfterStartAt',
+      'sponsoredBeforeEndAt',
+      'sponsoredAfterEndAt',
       'beforeVersion',
       'afterVersion',
       'beforeState',
@@ -400,6 +406,53 @@ export class AdminAuditService {
     }
 
     const normalized: Record<string, unknown> = {};
+    if (Object.keys(metadata).some((key) => key.startsWith('sponsored'))) {
+      if (
+        action !== AdminAuditAction.SPONSORED_CREATED &&
+        action !== AdminAuditAction.SPONSORED_UPDATED
+      )
+        throw new TypeError(
+          'Sponsored diff is only allowed for sponsored create/update',
+        );
+      const fields = metadata.sponsoredChangedFields;
+      const allowedFields = [
+        'content',
+        'cta',
+        'destinationUrl',
+        'startAt',
+        'endAt',
+      ];
+      if (!Array.isArray(fields))
+        throw new TypeError('Invalid sponsored changed fields');
+      const checkedFields: readonly unknown[] = fields;
+      if (
+        checkedFields.length > 5 ||
+        new Set(checkedFields).size !== checkedFields.length ||
+        checkedFields.some(
+          (field) =>
+            typeof field !== 'string' || !allowedFields.includes(field),
+        )
+      )
+        throw new TypeError('Invalid sponsored changed fields');
+      normalized.sponsoredChangedFields = [...checkedFields];
+      for (const key of [
+        'sponsoredBeforeStartAt',
+        'sponsoredAfterStartAt',
+        'sponsoredBeforeEndAt',
+        'sponsoredAfterEndAt',
+      ] as const) {
+        const value = metadata[key];
+        if (value === undefined) continue;
+        if (
+          typeof value !== 'string' ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+          !Number.isFinite(Date.parse(value)) ||
+          new Date(value).toISOString() !== value
+        )
+          throw new TypeError('Invalid sponsored audit timestamp');
+        normalized[key] = value;
+      }
+    }
     for (const key of [
       'beforeVersion',
       'afterVersion',
@@ -530,6 +583,36 @@ export class AdminAuditService {
     });
     const metadata = record.metadata
       ? Object.freeze({
+          ...(record.metadata.sponsoredChangedFields !== undefined
+            ? {
+                sponsoredChangedFields: [
+                  ...record.metadata.sponsoredChangedFields,
+                ] as NonNullable<
+                  AdminAuditMetadataInput['sponsoredChangedFields']
+                >,
+                ...(record.metadata.sponsoredBeforeStartAt !== undefined
+                  ? {
+                      sponsoredBeforeStartAt:
+                        record.metadata.sponsoredBeforeStartAt,
+                    }
+                  : {}),
+                ...(record.metadata.sponsoredAfterStartAt !== undefined
+                  ? {
+                      sponsoredAfterStartAt:
+                        record.metadata.sponsoredAfterStartAt,
+                    }
+                  : {}),
+                ...(record.metadata.sponsoredBeforeEndAt !== undefined
+                  ? {
+                      sponsoredBeforeEndAt:
+                        record.metadata.sponsoredBeforeEndAt,
+                    }
+                  : {}),
+                ...(record.metadata.sponsoredAfterEndAt !== undefined
+                  ? { sponsoredAfterEndAt: record.metadata.sponsoredAfterEndAt }
+                  : {}),
+              }
+            : {}),
           ...(record.metadata.beforeVersion !== undefined
             ? { beforeVersion: record.metadata.beforeVersion }
             : {}),

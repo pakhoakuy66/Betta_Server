@@ -107,6 +107,25 @@ export class AdminAuditTarget {
 @Schema({ _id: false, strict: 'throw' })
 export class AdminAuditMetadata {
   @Prop({
+    type: [String],
+    enum: ['content', 'cta', 'destinationUrl', 'startAt', 'endAt'],
+    default: undefined,
+    immutable: true,
+  })
+  sponsoredChangedFields?: string[];
+
+  @Prop({ type: String, maxlength: 24, immutable: true })
+  sponsoredBeforeStartAt?: string;
+
+  @Prop({ type: String, maxlength: 24, immutable: true })
+  sponsoredAfterStartAt?: string;
+
+  @Prop({ type: String, maxlength: 24, immutable: true })
+  sponsoredBeforeEndAt?: string;
+
+  @Prop({ type: String, maxlength: 24, immutable: true })
+  sponsoredAfterEndAt?: string;
+  @Prop({
     type: Number,
     min: 0,
     validate: { validator: isNonNegativeInteger },

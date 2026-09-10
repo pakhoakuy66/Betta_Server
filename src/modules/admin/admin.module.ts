@@ -1,4 +1,9 @@
+import { SponsoredLifecycleController } from '../sponsored-posts/sponsored-lifecycle.controller';
+import { SponsoredPostMutationController } from '../sponsored-posts/sponsored-post-mutation.controller';
 import { Module } from '@nestjs/common';
+import { SponsoredPostQueryController } from '../sponsored-posts/sponsored-post-query.controller';
+import { SponsoredPostsModule } from '../sponsored-posts/sponsored-posts.module';
+import { SponsoredMediaController } from '../sponsored-posts/sponsored-media.controller';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
@@ -157,6 +162,7 @@ import {
 
 @Module({
   imports: [
+    SponsoredPostsModule,
     ConfigModule,
     AccessSupportSecurityModule,
     OutboxModule,
@@ -210,6 +216,10 @@ import {
     ]),
   ],
   controllers: [
+    SponsoredPostMutationController,
+    SponsoredLifecycleController,
+    SponsoredPostQueryController,
+    SponsoredMediaController,
     AdminPostModerationController,
     AdminPostModerationDetailController,
     AdminReportAssignmentController,

@@ -44,4 +44,7 @@ export const SPONSORED_INDEXES = Object.freeze({
   statusList: 'sponsored_status_created_public_id',
   start: 'sponsored_status_start_public_id',
   end: 'sponsored_status_end_public_id',
+  health: 'sponsored_health_scan',
+  globalStart: 'sponsored_global_start_public_id',
+  globalEnd: 'sponsored_global_end_public_id',
 });

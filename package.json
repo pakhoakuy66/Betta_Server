@@ -94,6 +94,7 @@
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "0.34.5",
     "swagger-ui-dist": "^5.32.3"
   },
   "devDependencies": {

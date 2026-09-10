@@ -25,6 +25,7 @@ export class SponsoredPost {
   endAt!: Date;
   status!: SponsoredPostStatus;
   assetHealth!: SponsoredAssetHealth;
+  assetHealthCheckedAt!: Date | null;
   statusReason!: string;
   deletedAt!: Date | null;
   version!: number;
@@ -40,7 +41,7 @@ const imageSchema = new Schema<SponsoredImage>(
     url: { type: String, required: true, maxlength: 2048 },
     publicId: { type: String, required: true, maxlength: 255 },
   },
-  { _id: false, strict: 'throw' },
+  { _id: false, versionKey: false, strict: 'throw' },
 );
 
 export const SponsoredPostSchema = new Schema<SponsoredPost>(
@@ -90,6 +91,7 @@ export const SponsoredPostSchema = new Schema<SponsoredPost>(
       select: false,
     },
     deletedAt: { type: Date, default: null },
+    assetHealthCheckedAt: { type: Date, default: null, select: false },
     version: {
       type: Number,
       default: 0,
@@ -174,4 +176,17 @@ SponsoredPostSchema.index(
 SponsoredPostSchema.index(
   { status: 1, endAt: 1, publicId: 1 },
   { name: SPONSORED_INDEXES.end },
+);
+SponsoredPostSchema.index(
+  { status: 1, assetHealthCheckedAt: 1, publicId: 1 },
+  { name: SPONSORED_INDEXES.health },
+);
+// Global schedule browsing complements the existing status-prefixed indexes.
+SponsoredPostSchema.index(
+  { startAt: 1, publicId: 1 },
+  { name: SPONSORED_INDEXES.globalStart },
+);
+SponsoredPostSchema.index(
+  { endAt: 1, publicId: 1 },
+  { name: SPONSORED_INDEXES.globalEnd },
 );

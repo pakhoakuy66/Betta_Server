@@ -26,6 +26,17 @@ export type AdminAuditTargetInput = Readonly<{
 }>;
 
 export type AdminAuditMetadataInput = Readonly<{
+  sponsoredChangedFields?: readonly (
+    | 'content'
+    | 'cta'
+    | 'destinationUrl'
+    | 'startAt'
+    | 'endAt'
+  )[];
+  sponsoredBeforeStartAt?: string;
+  sponsoredAfterStartAt?: string;
+  sponsoredBeforeEndAt?: string;
+  sponsoredAfterEndAt?: string;
   beforeVersion?: number;
   afterVersion?: number;
   beforeState?: string;
